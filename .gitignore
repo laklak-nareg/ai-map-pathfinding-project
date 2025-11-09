@@ -1,24 +1,25 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+# Environment variables
+.env
+.env.* 
+!.env.example
 
-node_modules
-dist
-dist-ssr
-*.local
+# TypeScript build info
+*.tsbuildinfo
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+# Cache folders
+.vite/
+.cache/
+build/
+coverage/
+
+# Temporary files
+tmp/
+temp/
+
+# macOS metadata (in case missed)
+.AppleDouble
+.LSOverride
+
+# Editor-specific (extra)
+*.swp
+*.bak
