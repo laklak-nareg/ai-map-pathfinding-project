@@ -15,6 +15,9 @@ type MapType = "Empty" | "Random" | "Maze";
 
 type AlgoKey = "BFS" | "Dijkstra" | "Greedy" | "A*";
 
+type HeuristicType = "Manhattan" | "Chebyshev" | "Euclidean" | "WallAware";
+
+
 interface AlgoState {
   key: AlgoKey;
   open: Set<number>; // ids waiting (frontier) (for visualization only)
@@ -129,41 +132,118 @@ function generateRandom(N: number, density: number, seed: number, start: number,
   return blocks;
 }
 
-// Maze via DFS backtracker on cell grid (treat cells, carve passages)
-function generateMaze(N: number, seed: number, start: number, goal: number) {
-  // We create a perfect maze by starting with walls and carving passages between cells.
-  // Implementation: use a grid of cells and carve in 4-direction. For simplicity, we operate directly on cell blocks.
-  const blocks = new Uint8Array(N * N).fill(1); // start all walls
+// Maze via DFS backtracker on a coarser cell grid
+function generateMaze(N: number, seed: number) {
+  // Start with all walls
+  const blocks = new Uint8Array(N * N).fill(1);
   const R = rngLCG(seed);
-  const inBounds = (r: number, c: number) => r>=0 && r<N && c>=0 && c<N;
+
+  // We'll carve passages on a grid of "cells" at odd coordinates
+  const inBoundsCell = (r: number, c: number) =>
+    r > 0 && r < N - 1 && c > 0 && c < N - 1 && r % 2 === 1 && c % 2 === 1;
+
   const visited = new Uint8Array(N * N);
-  // choose odd-only positions as carveable cells for thicker walls if N large; here carve every cell via random DFS.
   const stack: Cell[] = [];
-  const sr = 0, sc = 0; // start carving from 0,0
-  stack.push({ r: sr, c: sc });
-  visited[idOf(N,sr,sc)] = 1; blocks[idOf(N,sr,sc)] = 0;
-  const order = [ [1,0],[-1,0],[0,1],[0,-1] ];
-  while (stack.length) {
-    const cur = stack[stack.length-1];
-    // shuffle directions
-    for (let i=order.length-1;i>0;i--) {
-      const j = Math.floor(((R.next().value as number))*(i+1));
-      [order[i], order[j]] = [order[j], order[i]];
-    }
-    let moved = false;
-    for (const [dr,dc] of order) {
-      const nr = cur.r + dr, nc = cur.c + dc;
-      if (!inBounds(nr,nc)) continue;
-      const id = idOf(N,nr,nc);
-      if (!visited[id]) {
-        visited[id] = 1; blocks[id] = 0; stack.push({ r: nr, c: nc }); moved = true; break;
-      }
-    }
-    if (!moved) stack.pop();
+
+  // Start carving from an odd cell (1,1) if possible
+  let sr = 1, sc = 1;
+  if (N <= 2) {
+    sr = 0;
+    sc = 0;
   }
-  blocks[start] = 0; blocks[goal] = 0;
+
+  stack.push({ r: sr, c: sc });
+  visited[idOf(N, sr, sc)] = 1;
+  blocks[idOf(N, sr, sc)] = 0;
+
+  const cellDirs: [number, number][] = [
+    [2, 0],
+    [-2, 0],
+    [0, 2],
+    [0, -2],
+  ];
+
+  while (stack.length) {
+    const cur = stack[stack.length - 1];
+
+    // shuffle directions for randomness
+    for (let i = cellDirs.length - 1; i > 0; i--) {
+      const j = Math.floor((R.next().value as number) * (i + 1));
+      [cellDirs[i], cellDirs[j]] = [cellDirs[j], cellDirs[i]];
+    }
+
+    let moved = false;
+
+    for (const [dr, dc] of cellDirs) {
+      const nr = cur.r + dr;
+      const nc = cur.c + dc;
+      if (!inBoundsCell(nr, nc)) continue;
+
+      const nid = idOf(N, nr, nc);
+      if (visited[nid]) continue;
+
+      visited[nid] = 1;
+      blocks[nid] = 0;
+
+      // carve the wall between current cell and next cell
+      const wr = cur.r + dr / 2;
+      const wc = cur.c + dc / 2;
+      blocks[idOf(N, wr, wc)] = 0;
+
+      stack.push({ r: nr, c: nc });
+      moved = true;
+      break;
+    }
+
+    if (!moved) {
+      stack.pop();
+    }
+  }
+
   return blocks;
 }
+
+
+function carvePathToGoal(
+  N: number,
+  blocks: Uint8Array,
+  start: number,
+  goal: number,
+  diag: boolean
+) {
+  // BFS that ignores walls, then we open a path along the found route
+  const prev = new Int32Array(N * N).fill(-1);
+  const q: number[] = [];
+
+  q.push(start);
+  prev[start] = start;
+
+  while (q.length) {
+    const v = q.shift()!;
+    if (v === goal) break;
+
+    for (const nb of neighbors(N, v, diag)) {
+      if (prev[nb] !== -1) continue;
+      // we allow moving through everything here (walls included),
+      // because we are planning to carve the path afterwards
+      prev[nb] = v;
+      q.push(nb);
+    }
+  }
+
+  // If goal still unreachable, give up (should be rare)
+  if (prev[goal] === -1) return;
+
+  // Walk backwards from goal to start and open all cells on that path
+  let cur = goal;
+  while (cur !== start) {
+    blocks[cur] = 0;
+    cur = prev[cur];
+  }
+  blocks[start] = 0;
+  blocks[goal] = 0;
+}
+
 
 // Connectivity check via quick BFS (to avoid unsolvable randoms);
 function solvable(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
@@ -176,6 +256,68 @@ function solvable(N: number, blocks: Uint8Array, start: number, goal: number, di
   }
   return false;
 }
+
+// mase friendly hueristic builder
+function buildHeuristic(
+  N: number,
+  blocks: Uint8Array,
+  goal: number,
+  diag: boolean,
+  type: HeuristicType
+): (id: number) => number {
+  const goalRC = rcOf(N, goal);
+
+  const baseManhattan = (id: number) => {
+    const p = rcOf(N, id);
+    return Math.abs(p.r - goalRC.r) + Math.abs(p.c - goalRC.c);
+  };
+
+  const baseChebyshev = (id: number) => {
+    const p = rcOf(N, id);
+    return Math.max(Math.abs(p.r - goalRC.r), Math.abs(p.c - goalRC.c));
+  };
+
+  const baseEuclidean = (id: number) => {
+    const p = rcOf(N, id);
+    const dr = p.r - goalRC.r;
+    const dc = p.c - goalRC.c;
+    return Math.sqrt(dr * dr + dc * dc);
+  };
+
+  const wallPenalty = (id: number) => {
+    const { r, c } = rcOf(N, id);
+    let count = 0;
+    const dirs = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as [number, number][];
+
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (nr < 0 || nr >= N || nc < 0 || nc >= N) {
+        count++;
+        continue;
+      }
+      if (blocks[idOf(N, nr, nc)] === 1) count++;
+    }
+    return count;
+  };
+
+  if (type === "WallAware") {
+    const base = diag ? baseChebyshev : baseManhattan;
+    const lambda = 0.3; // tweakable weight
+    return (id: number) => base(id) + lambda * wallPenalty(id);
+  }
+
+  if (type === "Chebyshev") return baseChebyshev;
+  if (type === "Euclidean") return baseEuclidean;
+  // default
+  return baseManhattan;
+}
+
 
 // ---------- Algorithm Step Generators ----------
 // Each returns a generator that yields one expansion per step; on completion it returns final AlgoState fields.
@@ -262,71 +404,239 @@ function* algoDijkstra(N: number, blocks: Uint8Array, start: number, goal: numbe
   return { key: "Dijkstra", open:new Set(), closed, parents, found:false, finished:true, nodesExpanded:meta.nodesExpanded, peakFrontier:meta.peakFrontier, lastRuntimeMs: performance.now()-begin } as AlgoState;
 }
 
-function* algoGreedy(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
+// function* algoGreedy(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
+//   const heap = new MinHeap<number>();
+//   const hFun = diag ? chebyshev : manhattan;
+//   const seen = new Uint8Array(N*N);
+//   const parents = new Map<number, number | null>(); parents.set(start,null);
+//   const open = new Set<number>();
+//   const closed = new Set<number>();
+//   const begin = performance.now();
+//   const meta = { nodesExpanded: 0, peakFrontier: 0 };
+
+//   heap.push(hFun(N,start,goal), start); open.add(start);
+//   while (heap.size()) {
+//     const n = heap.pop()!; open.delete(n);
+//     if (seen[n]) continue; seen[n]=1; closed.add(n);
+//     meta.nodesExpanded++;
+
+//     const cur: AlgoState = { key: "Greedy", open: new Set(open), closed: new Set(closed), parents, found:false, finished:false, current:n, nodesExpanded:meta.nodesExpanded, peakFrontier:Math.max(meta.peakFrontier, open.size), lastRuntimeMs: performance.now()-begin };
+//     yield cur;
+
+//     if (n===goal) {
+//       const path = reconstructPath(parents, goal);
+//       return { ...cur, found: true, finished: true, path, lastRuntimeMs: performance.now()-begin };
+//     }
+//     for (const m of neighbors(N,n,diag)) {
+//       if (blocks[m]===1) continue;
+//       if (!seen[m]) { parents.set(m,n); heap.push(hFun(N,m,goal), m); open.add(m); }
+//     }
+//     meta.peakFrontier = Math.max(meta.peakFrontier, open.size);
+//   }
+//   return { key: "Greedy", open:new Set(), closed, parents, found:false, finished:true, nodesExpanded:meta.nodesExpanded, peakFrontier:meta.peakFrontier, lastRuntimeMs: performance.now()-begin } as AlgoState;
+// }
+
+function* algoGreedy(
+  N: number,
+  blocks: Uint8Array,
+  start: number,
+  goal: number,
+  diag: boolean,
+  heuristic: (id: number) => number
+) {
   const heap = new MinHeap<number>();
-  const hFun = diag ? chebyshev : manhattan;
-  const seen = new Uint8Array(N*N);
-  const parents = new Map<number, number | null>(); parents.set(start,null);
+  const seen = new Uint8Array(N * N);
+  const parents = new Map<number, number | null>();
+  parents.set(start, null);
   const open = new Set<number>();
   const closed = new Set<number>();
   const begin = performance.now();
   const meta = { nodesExpanded: 0, peakFrontier: 0 };
 
-  heap.push(hFun(N,start,goal), start); open.add(start);
+  heap.push(heuristic(start), start);
+  open.add(start);
+
   while (heap.size()) {
-    const n = heap.pop()!; open.delete(n);
-    if (seen[n]) continue; seen[n]=1; closed.add(n);
+    const n = heap.pop()!;
+    open.delete(n);
+    if (seen[n]) continue;
+    seen[n] = 1;
+    closed.add(n);
     meta.nodesExpanded++;
 
-    const cur: AlgoState = { key: "Greedy", open: new Set(open), closed: new Set(closed), parents, found:false, finished:false, current:n, nodesExpanded:meta.nodesExpanded, peakFrontier:Math.max(meta.peakFrontier, open.size), lastRuntimeMs: performance.now()-begin };
+    const cur: AlgoState = {
+      key: "Greedy",
+      open: new Set(open),
+      closed: new Set(closed),
+      parents,
+      found: false,
+      finished: false,
+      current: n,
+      nodesExpanded: meta.nodesExpanded,
+      peakFrontier: Math.max(meta.peakFrontier, open.size),
+      lastRuntimeMs: performance.now() - begin,
+    };
     yield cur;
 
-    if (n===goal) {
+    if (n === goal) {
       const path = reconstructPath(parents, goal);
-      return { ...cur, found: true, finished: true, path, lastRuntimeMs: performance.now()-begin };
+      return {
+        ...cur,
+        found: true,
+        finished: true,
+        path,
+        lastRuntimeMs: performance.now() - begin,
+      };
     }
-    for (const m of neighbors(N,n,diag)) {
-      if (blocks[m]===1) continue;
-      if (!seen[m]) { parents.set(m,n); heap.push(hFun(N,m,goal), m); open.add(m); }
+
+    for (const m of neighbors(N, n, diag)) {
+      if (blocks[m] === 1) continue;
+      if (!seen[m]) {
+        if (!parents.has(m)) parents.set(m, n);
+        heap.push(heuristic(m), m);
+        open.add(m);
+      }
     }
     meta.peakFrontier = Math.max(meta.peakFrontier, open.size);
   }
-  return { key: "Greedy", open:new Set(), closed, parents, found:false, finished:true, nodesExpanded:meta.nodesExpanded, peakFrontier:meta.peakFrontier, lastRuntimeMs: performance.now()-begin } as AlgoState;
+
+  return {
+    key: "Greedy",
+    open: new Set(),
+    closed,
+    parents,
+    found: false,
+    finished: true,
+    nodesExpanded: meta.nodesExpanded,
+    peakFrontier: meta.peakFrontier,
+    lastRuntimeMs: performance.now() - begin,
+  } as AlgoState;
 }
 
-function* algoAStar(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
+
+// function* algoAStar(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
+//   const heap = new MinHeap<number>();
+//   const hFun = diag ? chebyshev : manhattan;
+//   const g = new Float64Array(N*N).fill(Infinity); g[start]=0;
+//   const seen = new Uint8Array(N*N);
+//   const parents = new Map<number, number | null>(); parents.set(start,null);
+//   const open = new Set<number>();
+//   const closed = new Set<number>();
+//   const begin = performance.now();
+//   const meta = { nodesExpanded: 0, peakFrontier: 0 };
+
+//   heap.push(hFun(N,start,goal), start); open.add(start);
+//   while (heap.size()) {
+//     const n = heap.pop()!; open.delete(n);
+//     if (seen[n]) continue; seen[n]=1; closed.add(n);
+//     meta.nodesExpanded++;
+
+//     const cur: AlgoState = { key: "A*", open: new Set(open), closed: new Set(closed), parents, found:false, finished:false, current:n, nodesExpanded:meta.nodesExpanded, peakFrontier:Math.max(meta.peakFrontier, open.size), lastRuntimeMs: performance.now()-begin };
+//     yield cur;
+
+//     if (n===goal) {
+//       const path = reconstructPath(parents, goal);
+//       return { ...cur, found: true, finished: true, path, lastRuntimeMs: performance.now()-begin };
+//     }
+//     for (const m of neighbors(N,n,diag)) {
+//       if (blocks[m]===1) continue; const w = (diag && (rcOf(N,n).r!==rcOf(N,m).r && rcOf(N,n).c!==rcOf(N,m).c)) ? Math.SQRT2 : 1;
+//       const ng = g[n] + w;
+//       if (ng < g[m]) { g[m]=ng; parents.set(m,n); const f = ng + hFun(N,m,goal); heap.push(f, m); open.add(m); }
+//     }
+//     meta.peakFrontier = Math.max(meta.peakFrontier, open.size);
+//   }
+//   return { key: "A*", open:new Set(), closed, parents, found:false, finished:true, nodesExpanded:meta.nodesExpanded, peakFrontier:meta.peakFrontier, lastRuntimeMs: performance.now()-begin } as AlgoState;
+// }
+
+
+function* algoAStar(
+  N: number,
+  blocks: Uint8Array,
+  start: number,
+  goal: number,
+  diag: boolean,
+  heuristic: (id: number) => number
+) {
   const heap = new MinHeap<number>();
-  const hFun = diag ? chebyshev : manhattan;
-  const g = new Float64Array(N*N).fill(Infinity); g[start]=0;
-  const seen = new Uint8Array(N*N);
-  const parents = new Map<number, number | null>(); parents.set(start,null);
+  const g = new Float64Array(N * N).fill(Infinity);
+  g[start] = 0;
+  const seen = new Uint8Array(N * N);
+  const parents = new Map<number, number | null>();
+  parents.set(start, null);
   const open = new Set<number>();
   const closed = new Set<number>();
   const begin = performance.now();
   const meta = { nodesExpanded: 0, peakFrontier: 0 };
 
-  heap.push(hFun(N,start,goal), start); open.add(start);
+  heap.push(heuristic(start), start);
+  open.add(start);
+
   while (heap.size()) {
-    const n = heap.pop()!; open.delete(n);
-    if (seen[n]) continue; seen[n]=1; closed.add(n);
+    const n = heap.pop()!;
+    open.delete(n);
+    if (seen[n]) continue;
+    seen[n] = 1;
+    closed.add(n);
     meta.nodesExpanded++;
 
-    const cur: AlgoState = { key: "A*", open: new Set(open), closed: new Set(closed), parents, found:false, finished:false, current:n, nodesExpanded:meta.nodesExpanded, peakFrontier:Math.max(meta.peakFrontier, open.size), lastRuntimeMs: performance.now()-begin };
+    const cur: AlgoState = {
+      key: "A*",
+      open: new Set(open),
+      closed: new Set(closed),
+      parents,
+      found: false,
+      finished: false,
+      current: n,
+      nodesExpanded: meta.nodesExpanded,
+      peakFrontier: Math.max(meta.peakFrontier, open.size),
+      lastRuntimeMs: performance.now() - begin,
+    };
     yield cur;
 
-    if (n===goal) {
+    if (n === goal) {
       const path = reconstructPath(parents, goal);
-      return { ...cur, found: true, finished: true, path, lastRuntimeMs: performance.now()-begin };
+      return {
+        ...cur,
+        found: true,
+        finished: true,
+        path,
+        lastRuntimeMs: performance.now() - begin,
+      };
     }
-    for (const m of neighbors(N,n,diag)) {
-      if (blocks[m]===1) continue; const w = (diag && (rcOf(N,n).r!==rcOf(N,m).r && rcOf(N,n).c!==rcOf(N,m).c)) ? Math.SQRT2 : 1;
+
+    for (const m of neighbors(N, n, diag)) {
+      if (blocks[m] === 1) continue;
+      const w =
+        diag &&
+        rcOf(N, n).r !== rcOf(N, m).r &&
+        rcOf(N, n).c !== rcOf(N, m).c
+          ? Math.SQRT2
+          : 1;
       const ng = g[n] + w;
-      if (ng < g[m]) { g[m]=ng; parents.set(m,n); const f = ng + hFun(N,m,goal); heap.push(f, m); open.add(m); }
+      if (ng < g[m]) {
+        g[m] = ng;
+        parents.set(m, n);
+        const f = ng + heuristic(m);
+        heap.push(f, m);
+        open.add(m);
+      }
     }
     meta.peakFrontier = Math.max(meta.peakFrontier, open.size);
   }
-  return { key: "A*", open:new Set(), closed, parents, found:false, finished:true, nodesExpanded:meta.nodesExpanded, peakFrontier:meta.peakFrontier, lastRuntimeMs: performance.now()-begin } as AlgoState;
+
+  return {
+    key: "A*",
+    open: new Set(),
+    closed,
+    parents,
+    found: false,
+    finished: true,
+    nodesExpanded: meta.nodesExpanded,
+    peakFrontier: meta.peakFrontier,
+    lastRuntimeMs: performance.now() - begin,
+  } as AlgoState;
 }
+
 
 // ---------- Canvas Drawing ----------
 function drawPanel(ctx: CanvasRenderingContext2D, N: number, sizePx: number, blocks: Uint8Array, state: AlgoState | null, start: number, goal: number) {
@@ -382,36 +692,77 @@ export default function PathfindingLab() {
   const [speed, setSpeed] = useState(10); // steps per second
   const [running, setRunning] = useState(false);
 
+  const [heuristicType, setHeuristicType] = useState<HeuristicType>("Manhattan");
+
+
   const sizePx = 360; // per panel
-  const start = 0;
-  const goal = useMemo(() => {
-  const R = rngLCG(seed + 999);        // deterministic per seed
-  let gr = Math.floor((R.next().value as number) * N);
-  let gc = Math.floor((R.next().value as number) * N);
-  let gid = idOf(N, gr, gc);
-  if (gid === start) {
-    gr = (gr + 1) % N;
-    gid = idOf(N, gr, gc);
-  }
-  return gid;
-}, [N, seed]);
+
+  // Start and goal are now stateful, so we can adapt them to the map
+  const [start, setStart] = useState(0);
+  const [goal, setGoal] = useState(0);
+
+  
 
   // Map generation
-  const blocks = useMemo(()=>{
+  const { blocks, startId, goalId } = useMemo(() => {
     let b: Uint8Array;
-    if (mapType === "Empty") b = generateEmpty(N);
-    else if (mapType === "Random") {
-      // regenerate until solvable (limit attempts)
-      let attempt = 0; do { b = generateRandom(N,density,seed+attempt,start,goal); attempt++; } while (attempt<30 && !solvable(N,b!,start,goal,diag));
+    let s = start;
+    let g = goal;
+  
+    if (mapType === "Empty") {
+      // simple: top-left to bottom-right
+      b = generateEmpty(N);
+      s = 0;
+      g = idOf(N, N - 1, N - 1);
+    } else if (mapType === "Random") {
+      // start fixed at 0, goal random but not equal to start
+      s = 0;
+      const R = rngLCG(seed + 999);
+      let gr = Math.floor((R.next().value as number) * N);
+      let gc = Math.floor((R.next().value as number) * N);
+      let gid = idOf(N, gr, gc);
+      if (gid === s) {
+        gr = (gr + 1) % N;
+        gid = idOf(N, gr, gc);
+      }
+      g = gid;
+  
+      let attempt = 0;
+      do {
+        b = generateRandom(N, density, seed + attempt, s, g);
+        attempt++;
+      } while (attempt < 30 && !solvable(N, b!, s, g, diag));
     } else {
-      b = generateMaze(N, seed, start, goal);
-      if (!solvable(N,b,start,goal,diag)) {
-        // open a sparse corridor by forcing empty on a diagonal line
-        for (let i=0;i<N;i++) b[idOf(N,i,i)] = 0;
+      // Maze: generate the maze without caring about start/goal yet
+      b = generateMaze(N, seed);
+  
+      // Collect all open cells
+      const open: number[] = [];
+      for (let i = 0; i < N * N; i++) {
+        if (b[i] === 0) open.push(i);
+      }
+  
+      if (open.length >= 2) {
+        // pick two far-ish cells along the DFS order
+        s = open[0];
+        g = open[open.length - 1];
+      } else {
+        // extreme fallback
+        s = 0;
+        g = idOf(N, N - 1, N - 1);
+        b[s] = 0;
+        b[g] = 0;
       }
     }
-    return b!;
-  }, [N,mapType,density,seed,start,goal,diag]);
+  
+    return { blocks: b!, startId: s, goalId: g };
+  }, [N, mapType, density, seed, diag]);
+
+  const heuristicFn = useMemo(
+    () => buildHeuristic(N, blocks, goal, diag, heuristicType),
+    [N, blocks, goal, diag, heuristicType]
+  );
+  
 
   // Algorithm generators and state
   const gensRef = useRef<Record<AlgoKey, Generator<AlgoState, AlgoState, void> | null>>({ BFS:null, Dijkstra:null, Greedy:null, "A*":null });
@@ -419,15 +770,15 @@ export default function PathfindingLab() {
   const [allFinished, setAllFinished] = useState(false);
 
   // Initialize generators when map or N changes
-  useEffect(()=>{
+  useEffect(() => {
     gensRef.current.BFS = algoBFS(N, blocks, start, goal, diag);
     gensRef.current.Dijkstra = algoDijkstra(N, blocks, start, goal, diag);
-    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag);
-    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag);
-    setAlgoStates({ BFS:null, Dijkstra:null, Greedy:null, "A*":null });
+    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag, heuristicFn);
+    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag, heuristicFn);
+    setAlgoStates({ BFS: null, Dijkstra: null, Greedy: null, "A*": null });
     setAllFinished(false);
     setRunning(false);
-  }, [N, blocks, start, goal, diag]);
+  }, [N, blocks, start, goal, diag, heuristicFn]);
 
   // Animation loop (lockstep)
   useEffect(() => {
@@ -493,9 +844,9 @@ export default function PathfindingLab() {
   const resetRun = () => {
     gensRef.current.BFS = algoBFS(N, blocks, start, goal, diag);
     gensRef.current.Dijkstra = algoDijkstra(N, blocks, start, goal, diag);
-    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag);
-    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag);
-    setAlgoStates({ BFS:null, Dijkstra:null, Greedy:null, "A*":null });
+    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag, heuristicFn);
+    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag, heuristicFn);
+    setAlgoStates({ BFS: null, Dijkstra: null, Greedy: null, "A*": null });
     setAllFinished(false);
     setRunning(false);
   };
@@ -513,6 +864,11 @@ export default function PathfindingLab() {
   
     return items;
   }, [algoStates]);
+
+  useEffect(() => {
+    setStart(startId);
+    setGoal(goalId);
+  }, [startId, goalId]);
 
   return (
     <div className="min-h-screen">
@@ -546,6 +902,22 @@ export default function PathfindingLab() {
               <input id="diag" type="checkbox" checked={diag} onChange={e=>setDiag(e.target.checked)} />
               <label htmlFor="diag" className="text-sm">Allow diagonal moves</label>
             </div>
+            {/* Heuristic Selector */}
+            {/* Heuristic Selector */}
+            <div className="mt-3">
+              <label className="block text-sm mb-1">Heuristic</label>
+              <select
+                value={heuristicType}
+                onChange={e => setHeuristicType(e.target.value as HeuristicType)}
+                className="w-full border rounded px-3 py-2"
+              >
+                <option value="Manhattan">Manhattan (L1)</option>
+                <option value="Euclidean">Euclidean (L2)</option>
+                <option value="Chebyshev">Chebyshev (L∞)</option>
+                <option value="WallAware">Wall-Aware (experimental)</option>
+              </select>
+            </div>
+
           </div>
           <div className="control-card">
             <label className="block text-sm mb-1">Seed</label>
