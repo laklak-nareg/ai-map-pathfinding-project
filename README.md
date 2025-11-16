@@ -18,7 +18,7 @@ Built with **React + TypeScript**, this project allows users to explore how diff
   - Obstacle density (for Random maps)
   - Maze tightness (for Maze maps)
   - Search speed (steps per second)
-  - Heuristic type (Manhattan / Chebyshev)
+  - Heuristic type (Manhattan / Chebyshev / Euclidean Distance / Well Aware)
   - Diagonal movement toggle  
 - 🎯 **Randomized start and goal points**
 - 🧩 **Performance metrics:**
@@ -49,13 +49,52 @@ Built with **React + TypeScript**, this project allows users to explore how diff
 
 ---
 
+
 ## 🧮 Heuristics
 
-- **Manhattan Distance:**  
-  \( h(n) = |x_1 - x_2| + |y_1 - y_2| \) — best for 4-direction movement  
+This project supports **four** heuristics that influence Greedy and A\*.
 
-- **Chebyshev Distance:**  
-  \( h(n) = \max(|x_1 - x_2|, |y_1 - y_2|) \) — good for 8-direction movement  
+### **1. Manhattan Distance (L1)**  
+Best for 4-direction grids.
+
+\[
+h(n) = |x_1 - x_2| + |y_1 - y_2|
+\]
+
+---
+
+### **2. Euclidean Distance (L2)**  
+Models straight-line distance.
+
+\[
+h(n) = \sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2}
+\]
+
+---
+
+### **3. Chebyshev Distance (L∞)**  
+Ideal when diagonal movement is allowed.
+
+\[
+h(n) = \max(|x_1 - x_2|,\ |y_1 - y_2|)
+\]
+
+---
+
+### **4. Wall-Aware Heuristic (Experimental)**  
+Penalizes nodes near walls to avoid dead-ends.
+
+\[
+h(n) = h_{\text{base}}(n) + \lambda \cdot \text{WallPenalty}(n)
+\]
+
+Where:
+- \( h_{\text{base}} \) = Manhattan or Chebyshev  
+- \( \lambda = 0.3 \)  
+- WallPenalty = number of adjacent walls (0–4)
+
+
+  
 
 Users can experiment with both to see how heuristics influence speed and path quality.
 
