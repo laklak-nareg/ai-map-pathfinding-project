@@ -13,7 +13,7 @@ type Cell = { r: number; c: number };
 
 type MapType = "Empty" | "Random" | "Maze";
 
-type AlgoKey = "BFS" | "Dijkstra" | "Greedy" | "A*";
+type AlgoKey = "BFS" | "Dijkstra" | "Greedy" | "A*" | "BiA*";
 
 type HeuristicType = "Manhattan" | "Chebyshev" | "Euclidean" | "WallAware";
 
@@ -385,6 +385,197 @@ function buildHeuristic(
 }
 // ---------- Algorithm Step Generators ----------
 // Each returns a generator that yields one expansion per step; on completion it returns final AlgoState fields.
+
+function* algoBiAStar(
+  N: number,
+  blocks: Uint8Array,
+  start: number,
+  goal: number,
+  diag: boolean,
+  hForward: (id: number) => number,
+  hBackward: (id: number) => number
+): Generator<AlgoState, AlgoState, void> {
+  const heapF = new MinHeap<number>(); // forward (start -> goal)
+  const heapB = new MinHeap<number>(); // backward (goal -> start)
+
+  const gF = new Float64Array(N * N).fill(Infinity);
+  const gB = new Float64Array(N * N).fill(Infinity);
+  gF[start] = 0;
+  gB[goal] = 0;
+
+  const seenF = new Uint8Array(N * N);
+  const seenB = new Uint8Array(N * N);
+
+  const parentsF = new Map<number, number | null>(); // from start
+  const parentsB = new Map<number, number | null>(); // from goal
+  parentsF.set(start, null);
+  parentsB.set(goal, null);
+
+  const openF = new Set<number>();
+  const openB = new Set<number>();
+  const closedF = new Set<number>();
+  const closedB = new Set<number>();
+
+  const begin = performance.now();
+  const meta = { nodesExpanded: 0, peakFrontier: 0 };
+
+  heapF.push(hForward(start), start);
+  heapB.push(hBackward(goal), goal);
+  openF.add(start);
+  openB.add(goal);
+
+  let meeting: number | null = null;
+
+  const reconstructBiPath = (): number[] => {
+    if (meeting === null) return [];
+    // forward: start -> meeting
+    const pathF = reconstructPath(parentsF, meeting);
+    // backward: goal -> meeting
+    const pathB = reconstructPath(parentsB, meeting); // [goal, ..., meeting]
+    pathB.reverse(); // [meeting, ..., goal]
+    // concat, drop duplicate meeting
+    return pathF.concat(pathB.slice(1));
+  };
+
+  while (heapF.size() || heapB.size()) {
+    // Expand FORWARD once
+    if (heapF.size()) {
+      const n = heapF.pop()!;
+      openF.delete(n);
+      if (!seenF[n]) {
+        seenF[n] = 1;
+        closedF.add(n);
+        meta.nodesExpanded++;
+
+        if (seenB[n]) {
+          meeting = n;
+          const path = reconstructBiPath();
+          const openAll = new Set<number>([...openF, ...openB]);
+          const closedAll = new Set<number>([...closedF, ...closedB]);
+          return {
+            key: "BiA*",
+            open: openAll,
+            closed: closedAll,
+            parents: parentsF, // forward parents are enough to explain from start side
+            found: true,
+            finished: true,
+            current: n,
+            path,
+            nodesExpanded: meta.nodesExpanded,
+            peakFrontier: Math.max(meta.peakFrontier, openAll.size),
+            lastRuntimeMs: performance.now() - begin,
+          };
+        }
+
+        for (const m of neighbors(N, n, diag)) {
+          if (blocks[m] === 1) continue;
+          const w =
+            diag &&
+            rcOf(N, n).r !== rcOf(N, m).r &&
+            rcOf(N, n).c !== rcOf(N, m).c
+              ? Math.SQRT2
+              : 1;
+          const ng = gF[n] + w;
+          if (ng < gF[m]) {
+            gF[m] = ng;
+            parentsF.set(m, n);
+            const f = ng + hForward(m);
+            heapF.push(f, m);
+            openF.add(m);
+          }
+        }
+      }
+    }
+
+    // Expand BACKWARD once
+    if (heapB.size()) {
+      const n = heapB.pop()!;
+      openB.delete(n);
+      if (!seenB[n]) {
+        seenB[n] = 1;
+        closedB.add(n);
+        meta.nodesExpanded++;
+
+        if (seenF[n]) {
+          meeting = n;
+          const path = reconstructBiPath();
+          const openAll = new Set<number>([...openF, ...openB]);
+          const closedAll = new Set<number>([...closedF, ...closedB]);
+          return {
+            key: "BiA*",
+            open: openAll,
+            closed: closedAll,
+            parents: parentsF,
+            found: true,
+            finished: true,
+            current: n,
+            path,
+            nodesExpanded: meta.nodesExpanded,
+            peakFrontier: Math.max(meta.peakFrontier, openAll.size),
+            lastRuntimeMs: performance.now() - begin,
+          };
+        }
+
+        for (const m of neighbors(N, n, diag)) {
+          if (blocks[m] === 1) continue;
+          const w =
+            diag &&
+            rcOf(N, n).r !== rcOf(N, m).r &&
+            rcOf(N, n).c !== rcOf(N, m).c
+              ? Math.SQRT2
+              : 1;
+          const ng = gB[n] + w;
+          if (ng < gB[m]) {
+            gB[m] = ng;
+            parentsB.set(m, n);
+            const f = ng + hBackward(m);
+            heapB.push(f, m);
+            openB.add(m);
+          }
+        }
+      }
+    }
+
+    // yield combined visualization state
+    const openAll = new Set<number>([...openF, ...openB]);
+    const closedAll = new Set<number>([...closedF, ...closedB]);
+    meta.peakFrontier = Math.max(meta.peakFrontier, openAll.size);
+
+    const cur: AlgoState = {
+      key: "BiA*",
+      open: openAll,
+      closed: closedAll,
+      parents: parentsF,
+      found: false,
+      finished: false,
+      current: null as any, // we don't highlight a single node here
+      nodesExpanded: meta.nodesExpanded,
+      peakFrontier: meta.peakFrontier,
+      lastRuntimeMs: performance.now() - begin,
+    };
+
+    yield cur;
+  }
+
+  // No meeting → no path
+  const openAll = new Set<number>([...openF, ...openB]);
+  const closedAll = new Set<number>([...closedF, ...closedB]);
+  return {
+    key: "BiA*",
+    open: openAll,
+    closed: closedAll,
+    parents: parentsF,
+    found: false,
+    finished: true,
+    current: undefined,
+    path: undefined,
+    nodesExpanded: meta.nodesExpanded,
+    peakFrontier: meta.peakFrontier,
+    lastRuntimeMs: performance.now() - begin,
+  } as AlgoState;
+}
+
+
 
 function* algoBFS(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
   const openQ: number[] = [start];
@@ -916,12 +1107,13 @@ export default function PathfindingLab() {
     let g = goal;
   
     if (mapType === "Empty") {
-      // simple: top-left to bottom-right
+      // Simple: top-left to bottom-right
       b = generateEmpty(N);
       s = 0;
       g = idOf(N, N - 1, N - 1);
+  
     } else if (mapType === "Random") {
-      // start fixed at 0, goal random but not equal to start
+      // Start fixed at 0, goal random but not equal to start
       s = 0;
       const R = rngLCG(seed + 999);
       let gr = Math.floor((R.next().value as number) * N);
@@ -933,22 +1125,23 @@ export default function PathfindingLab() {
       }
       g = gid;
   
-      let attempt = 0;
-      do {
-        b = generateRandom(N, density, seed + attempt, s, g);
-        attempt++;
-      } while (attempt < 30 && !solvable(N, b!, s, g, diag));
+      // 1) Generate a random obstacle field
+      b = generateRandom(N, density, seed, s, g);
+  
+      // 2) GUARANTEE at least one path from s → g
+      carvePathToGoal(N, b, s, g, diag);
+  
     } else {
       // Maze
       b = generateMaze(N, seed);
   
       if (deceptiveMaze) {
-        // 🔥 special case: pick a start/goal that misleads Greedy
+        // Special case: pick a start/goal that misleads Greedy
         const pair = pickDeceptiveStartGoal(N, b, diag, seed);
         s = pair.start;
         g = pair.goal;
       } else {
-        // normal maze: just pick two far-ish open cells
+        // Normal maze: just pick two far-ish open cells
         const open: number[] = [];
         for (let i = 0; i < N * N; i++) {
           if (b[i] === 0) open.push(i);
@@ -958,7 +1151,7 @@ export default function PathfindingLab() {
           s = open[0];
           g = open[open.length - 1];
         } else {
-          // extreme fallback
+          // Extreme fallback
           s = 0;
           g = idOf(N, N - 1, N - 1);
           b[s] = 0;
@@ -976,41 +1169,102 @@ export default function PathfindingLab() {
   // );
 
   // Heuristic for Greedy
-const greedyHeuristicFn = useMemo(() => {
-  const typeForGreedy =
-    deceptiveMaze && mapType === "Maze"
-      ? "Manhattan"          // force naive heuristic in trap mode
-      : heuristicType;       // otherwise follow user selection
-
-  return buildHeuristic(N, blocks, goal, diag, typeForGreedy);
-}, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
-
-// Heuristic for A*
-const aStarHeuristicFn = useMemo(() => {
-  const typeForAStar =
-    deceptiveMaze && mapType === "Maze"
-      ? "WallAware"          // smarter heuristic only for A* in trap mode
-      : heuristicType;
-
-  return buildHeuristic(N, blocks, goal, diag, typeForAStar);
-}, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
+  const greedyHeuristicFn = useMemo(() => {
+    const typeForGreedy =
+      deceptiveMaze && mapType === "Maze"
+        ? "Manhattan"          // force naive heuristic in trap mode
+        : heuristicType;       // otherwise follow user selection
+  
+    return buildHeuristic(N, blocks, goal, diag, typeForGreedy);
+  }, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
+  
+  // Heuristic for A*
+  const aStarHeuristicFn = useMemo(() => {
+    const typeForAStar =
+      deceptiveMaze && mapType === "Maze"
+        ? "WallAware"          // smarter heuristic only for A* in trap mode
+        : heuristicType;
+  
+    return buildHeuristic(N, blocks, goal, diag, typeForAStar);
+  }, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
+  
+  // Heuristic for Bidirectional A* — forward search (start -> goal)
+  const biAStarForwardHeuristicFn = useMemo(() => {
+    const typeForBiAStar =
+      deceptiveMaze && mapType === "Maze"
+        ? "WallAware"
+        : heuristicType;
+  
+    // same as A*: estimate distance to goal
+    return buildHeuristic(N, blocks, goal, diag, typeForBiAStar);
+  }, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
+  
+  // Heuristic for Bidirectional A* — backward search (goal -> start)
+  const biAStarBackwardHeuristicFn = useMemo(() => {
+    const typeForBiAStar =
+      deceptiveMaze && mapType === "Maze"
+        ? "WallAware"
+        : heuristicType;
+  
+    // symmetric: now we estimate distance to START instead
+    return buildHeuristic(N, blocks, start, diag, typeForBiAStar);
+  }, [N, blocks, start, diag, heuristicType, deceptiveMaze, mapType]);
   
 
   // Algorithm generators and state
-  const gensRef = useRef<Record<AlgoKey, Generator<AlgoState, AlgoState, void> | null>>({ BFS:null, Dijkstra:null, Greedy:null, "A*":null });
-  const [algoStates, setAlgoStates] = useState<Record<AlgoKey, AlgoState | null>>({ BFS:null, Dijkstra:null, Greedy:null, "A*":null });
+  const gensRef = useRef<Record<AlgoKey, Generator<AlgoState, AlgoState, void> | null>>({
+    BFS: null,
+    Dijkstra: null,
+    Greedy: null,
+    "A*": null,
+    "BiA*": null,
+  });
+  
+  const [algoStates, setAlgoStates] = useState<Record<AlgoKey, AlgoState | null>>({
+    BFS: null,
+    Dijkstra: null,
+    Greedy: null,
+    "A*": null,
+    "BiA*": null,
+  });
   const [allFinished, setAllFinished] = useState(false);
 
   // Initialize generators when map or N changes
   useEffect(() => {
-    gensRef.current.BFS      = algoBFS(N, blocks, start, goal, diag);
+    gensRef.current.BFS = algoBFS(N, blocks, start, goal, diag);
     gensRef.current.Dijkstra = algoDijkstra(N, blocks, start, goal, diag);
-    gensRef.current.Greedy   = algoGreedy(N, blocks, start, goal, diag, greedyHeuristicFn);
-    gensRef.current["A*"]    = algoAStar(N, blocks, start, goal, diag, aStarHeuristicFn);
-    setAlgoStates({ BFS: null, Dijkstra: null, Greedy: null, "A*": null });
+    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag, greedyHeuristicFn);
+    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag, aStarHeuristicFn);
+    gensRef.current["BiA*"] = algoBiAStar(
+      N,
+      blocks,
+      start,
+      goal,
+      diag,
+      biAStarForwardHeuristicFn,
+      biAStarBackwardHeuristicFn
+    );
+  
+    setAlgoStates({
+      BFS: null,
+      Dijkstra: null,
+      Greedy: null,
+      "A*": null,
+      "BiA*": null,
+    });
     setAllFinished(false);
     setRunning(false);
-  }, [N, blocks, start, goal, diag, greedyHeuristicFn, aStarHeuristicFn]);
+  }, [
+    N,
+    blocks,
+    start,
+    goal,
+    diag,
+    greedyHeuristicFn,
+    aStarHeuristicFn,
+    biAStarForwardHeuristicFn,
+    biAStarBackwardHeuristicFn,
+  ]);
 
   // Animation loop (lockstep)
   useEffect(() => {
@@ -1063,7 +1317,11 @@ const aStarHeuristicFn = useMemo(() => {
 
   // Canvas refs and drawing
   const canvasRefs: Record<AlgoKey, React.RefObject<HTMLCanvasElement>> = {
-    BFS: useRef(null), Dijkstra: useRef(null), Greedy: useRef(null), "A*": useRef(null)
+    BFS: useRef(null),
+    Dijkstra: useRef(null),
+    Greedy: useRef(null),
+    "A*": useRef(null),
+    "BiA*": useRef(null),
   };
   useEffect(()=>{
     (Object.keys(canvasRefs) as AlgoKey[]).forEach(key => {
@@ -1074,14 +1332,31 @@ const aStarHeuristicFn = useMemo(() => {
   }, [algoStates, N, blocks, start, goal]);
 
   const resetRun = () => {
-    gensRef.current.BFS      = algoBFS(N, blocks, start, goal, diag);
+    gensRef.current.BFS = algoBFS(N, blocks, start, goal, diag);
     gensRef.current.Dijkstra = algoDijkstra(N, blocks, start, goal, diag);
-    gensRef.current.Greedy   = algoGreedy(N, blocks, start, goal, diag, greedyHeuristicFn);
-    gensRef.current["A*"]    = algoAStar(N, blocks, start, goal, diag, aStarHeuristicFn);
-    setAlgoStates({ BFS: null, Dijkstra: null, Greedy: null, "A*": null });
+    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag, greedyHeuristicFn);
+    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag, aStarHeuristicFn);
+    gensRef.current["BiA*"] = algoBiAStar(
+      N,
+      blocks,
+      start,
+      goal,
+      diag,
+      biAStarForwardHeuristicFn,
+      biAStarBackwardHeuristicFn
+    );
+  
+    setAlgoStates({
+      BFS: null,
+      Dijkstra: null,
+      Greedy: null,
+      "A*": null,
+      "BiA*": null,
+    });
     setAllFinished(false);
     setRunning(false);
   };
+  
 
   const winningOrder = useMemo(() => {
     const items = Object.entries(algoStates)
