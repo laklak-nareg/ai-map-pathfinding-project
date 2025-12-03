@@ -74,8 +74,8 @@ Users can experiment with both to see how heuristics influence speed and path qu
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-username>/ai-pathfinding-lab.git
-cd ai-pathfinding-lab
+git clone https://github.com/laklak-nareg/ai-map-pathfinding-project.git
+cd ai-map-pathfinding-project
 
 # Install dependencies
 npm install
