@@ -258,6 +258,66 @@ function solvable(N: number, blocks: Uint8Array, start: number, goal: number, di
 }
 
 // mase friendly hueristic builder
+// function buildHeuristic(
+//   N: number,
+//   blocks: Uint8Array,
+//   goal: number,
+//   diag: boolean,
+//   type: HeuristicType
+// ): (id: number) => number {
+//   const goalRC = rcOf(N, goal);
+
+//   const baseManhattan = (id: number) => {
+//     const p = rcOf(N, id);
+//     return Math.abs(p.r - goalRC.r) + Math.abs(p.c - goalRC.c);
+//   };
+
+//   const baseChebyshev = (id: number) => {
+//     const p = rcOf(N, id);
+//     return Math.max(Math.abs(p.r - goalRC.r), Math.abs(p.c - goalRC.c));
+//   };
+
+//   const baseEuclidean = (id: number) => {
+//     const p = rcOf(N, id);
+//     const dr = p.r - goalRC.r;
+//     const dc = p.c - goalRC.c;
+//     return Math.sqrt(dr * dr + dc * dc);
+//   };
+
+//   const wallPenalty = (id: number) => {
+//     const { r, c } = rcOf(N, id);
+//     let count = 0;
+//     const dirs = [
+//       [1, 0],
+//       [-1, 0],
+//       [0, 1],
+//       [0, -1],
+//     ] as [number, number][];
+
+//     for (const [dr, dc] of dirs) {
+//       const nr = r + dr;
+//       const nc = c + dc;
+//       if (nr < 0 || nr >= N || nc < 0 || nc >= N) {
+//         count++;
+//         continue;
+//       }
+//       if (blocks[idOf(N, nr, nc)] === 1) count++;
+//     }
+//     return count;
+//   };
+
+//   if (type === "WallAware") {
+//     const base = diag ? baseChebyshev : baseManhattan;
+//     const lambda = 0.3; // tweakable weight
+//     return (id: number) => base(id) + lambda * wallPenalty(id);
+//   }
+
+//   if (type === "Chebyshev") return baseChebyshev;
+//   if (type === "Euclidean") return baseEuclidean;
+//   // default
+//   return baseManhattan;
+// }
+
 function buildHeuristic(
   N: number,
   blocks: Uint8Array,
@@ -287,12 +347,12 @@ function buildHeuristic(
   const wallPenalty = (id: number) => {
     const { r, c } = rcOf(N, id);
     let count = 0;
-    const dirs = [
+    const dirs: [number, number][] = [
       [1, 0],
       [-1, 0],
       [0, 1],
       [0, -1],
-    ] as [number, number][];
+    ];
 
     for (const [dr, dc] of dirs) {
       const nr = r + dr;
@@ -306,19 +366,23 @@ function buildHeuristic(
     return count;
   };
 
+  // 💣 Make the wall-aware heuristic *much* more punishing for "tunnel" cells
   if (type === "WallAware") {
     const base = diag ? baseChebyshev : baseManhattan;
-    const lambda = 0.3; // tweakable weight
-    return (id: number) => base(id) + lambda * wallPenalty(id);
+    const lambda = 1.2; // was 0.3 — now walls hurt a LOT more
+
+    return (id: number) => {
+      const h = base(id);
+      if (h === 0) return 0;
+      const penalty = wallPenalty(id);
+      return h + lambda * penalty;
+    };
   }
 
   if (type === "Chebyshev") return baseChebyshev;
   if (type === "Euclidean") return baseEuclidean;
-  // default
   return baseManhattan;
 }
-
-
 // ---------- Algorithm Step Generators ----------
 // Each returns a generator that yields one expansion per step; on completion it returns final AlgoState fields.
 
@@ -681,6 +745,89 @@ function drawPanel(ctx: CanvasRenderingContext2D, N: number, sizePx: number, blo
   for (let j=0;j<=N;j++) { ctx.beginPath(); ctx.moveTo(j*cell, 0); ctx.lineTo(j*cell, sizePx); ctx.stroke(); }
 }
 
+function pickDeceptiveStartGoal(
+  N: number,
+  blocks: Uint8Array,
+  diag: boolean,
+  seed: number
+): { start: number; goal: number } {
+  // collect all free cells
+  const free: number[] = [];
+  for (let i = 0; i < N * N; i++) {
+    if (blocks[i] === 0) free.push(i);
+  }
+  // extreme fallback
+  if (free.length < 2) {
+    return { start: 0, goal: idOf(N, N - 1, N - 1) };
+  }
+
+  // deterministic RNG so it’s reproducible per seed
+  const R = rngLCG(seed + 4242);
+  const start = free[Math.floor((R.next().value as number) * free.length)];
+
+  // BFS distances from start (only through free cells)
+  const dist = new Int32Array(N * N).fill(-1);
+  const q: number[] = [];
+  dist[start] = 0;
+  q.push(start);
+
+  while (q.length) {
+    const v = q.shift()!;
+    for (const nb of neighbors(N, v, diag)) {
+      if (blocks[nb] === 1) continue;          // wall
+      if (dist[nb] !== -1) continue;
+      dist[nb] = dist[v] + 1;
+      q.push(nb);
+    }
+  }
+
+  const hFun = diag ? chebyshev : manhattan;
+
+  let bestGoal = -1;
+  let bestScore = -1;
+
+  for (const cell of free) {
+    if (cell === start) continue;
+    if (dist[cell] === -1) continue;          // unreachable (shouldn’t happen in a perfect maze)
+
+    // how many free neighbours? dead end ≈ 1
+    let freeNb = 0;
+    for (const nb of neighbors(N, cell, diag)) {
+      if (blocks[nb] === 0) freeNb++;
+    }
+    const isDeadEnd = freeNb === 1;
+
+    const h = hFun(N, start, cell);
+    const d = dist[cell];
+
+    // we want cases where d >> h
+    const gap = d - h;
+    if (gap <= 0) continue;
+
+    const score = gap + (isDeadEnd ? 5 : 0);  // dead ends get a bonus
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestGoal = cell;
+    }
+  }
+
+  // fallback: just pick the farthest reachable cell by BFS
+  if (bestGoal === -1) {
+    let far = start;
+    let farDist = 0;
+    for (let i = 0; i < N * N; i++) {
+      if (dist[i] > farDist) {
+        farDist = dist[i];
+        far = i;
+      }
+    }
+    bestGoal = far;
+  }
+
+  return { start, goal: bestGoal };
+}
+
 // ---------- Main Component ----------
 export default function PathfindingLab() {
   // UI State
@@ -693,6 +840,8 @@ export default function PathfindingLab() {
   const [running, setRunning] = useState(false);
 
   const [heuristicType, setHeuristicType] = useState<HeuristicType>("Manhattan");
+  const [deceptiveMaze, setDeceptiveMaze] = useState(false);
+
 
 
   const sizePx = 360; // per panel
@@ -704,6 +853,63 @@ export default function PathfindingLab() {
   
 
   // Map generation
+  // const { blocks, startId, goalId } = useMemo(() => {
+  //   let b: Uint8Array;
+  //   let s = start;
+  //   let g = goal;
+  
+  //   if (mapType === "Empty") {
+  //     // simple: top-left to bottom-right
+  //     b = generateEmpty(N);
+  //     s = 0;
+  //     g = idOf(N, N - 1, N - 1);
+  //   } else if (mapType === "Random") {
+  //     // start fixed at 0, goal random but not equal to start
+  //     s = 0;
+  //     const R = rngLCG(seed + 999);
+  //     let gr = Math.floor((R.next().value as number) * N);
+  //     let gc = Math.floor((R.next().value as number) * N);
+  //     let gid = idOf(N, gr, gc);
+  //     if (gid === s) {
+  //       gr = (gr + 1) % N;
+  //       gid = idOf(N, gr, gc);
+  //     }
+  //     g = gid;
+  
+  //     let attempt = 0;
+  //     do {
+  //       b = generateRandom(N, density, seed + attempt, s, g);
+  //       attempt++;
+  //     } while (attempt < 30 && !solvable(N, b!, s, g, diag));
+  //   } else {
+  //     // Maze: generate the maze without caring about start/goal yet
+  //     b = generateMaze(N, seed);
+  //     const pair = pickDeceptiveStartGoal(N, b, diag, seed);
+  
+  //     // Collect all open cells
+  //     // const open: number[] = [];
+  //     // for (let i = 0; i < N * N; i++) {
+  //     //   if (b[i] === 0) open.push(i);
+  //     // }
+  
+  //     // if (open.length >= 2) {
+  //     //   // pick two far-ish cells along the DFS order
+  //     //   s = open[0];
+  //     //   g = open[open.length - 1];
+  //     // } else {
+  //     //   // extreme fallback
+  //     //   s = 0;
+  //     //   g = idOf(N, N - 1, N - 1);
+  //     //   b[s] = 0;
+  //     //   b[g] = 0;
+  //     // }
+  //     s = pair.start;
+  //     g = pair.goal;
+  //   } 
+  
+  //   return { blocks: b!, startId: s, goalId: g };
+  // }, [N, mapType, density, seed, diag]);
+
   const { blocks, startId, goalId } = useMemo(() => {
     let b: Uint8Array;
     let s = start;
@@ -733,35 +939,61 @@ export default function PathfindingLab() {
         attempt++;
       } while (attempt < 30 && !solvable(N, b!, s, g, diag));
     } else {
-      // Maze: generate the maze without caring about start/goal yet
+      // Maze
       b = generateMaze(N, seed);
   
-      // Collect all open cells
-      const open: number[] = [];
-      for (let i = 0; i < N * N; i++) {
-        if (b[i] === 0) open.push(i);
-      }
-  
-      if (open.length >= 2) {
-        // pick two far-ish cells along the DFS order
-        s = open[0];
-        g = open[open.length - 1];
+      if (deceptiveMaze) {
+        // 🔥 special case: pick a start/goal that misleads Greedy
+        const pair = pickDeceptiveStartGoal(N, b, diag, seed);
+        s = pair.start;
+        g = pair.goal;
       } else {
-        // extreme fallback
-        s = 0;
-        g = idOf(N, N - 1, N - 1);
-        b[s] = 0;
-        b[g] = 0;
+        // normal maze: just pick two far-ish open cells
+        const open: number[] = [];
+        for (let i = 0; i < N * N; i++) {
+          if (b[i] === 0) open.push(i);
+        }
+  
+        if (open.length >= 2) {
+          s = open[0];
+          g = open[open.length - 1];
+        } else {
+          // extreme fallback
+          s = 0;
+          g = idOf(N, N - 1, N - 1);
+          b[s] = 0;
+          b[g] = 0;
+        }
       }
     }
   
     return { blocks: b!, startId: s, goalId: g };
-  }, [N, mapType, density, seed, diag]);
+  }, [N, mapType, density, seed, diag, deceptiveMaze]);
 
-  const heuristicFn = useMemo(
-    () => buildHeuristic(N, blocks, goal, diag, heuristicType),
-    [N, blocks, goal, diag, heuristicType]
-  );
+  // const heuristicFn = useMemo(
+  //   () => buildHeuristic(N, blocks, goal, diag, heuristicType),
+  //   [N, blocks, goal, diag, heuristicType]
+  // );
+
+  // Heuristic for Greedy
+const greedyHeuristicFn = useMemo(() => {
+  const typeForGreedy =
+    deceptiveMaze && mapType === "Maze"
+      ? "Manhattan"          // force naive heuristic in trap mode
+      : heuristicType;       // otherwise follow user selection
+
+  return buildHeuristic(N, blocks, goal, diag, typeForGreedy);
+}, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
+
+// Heuristic for A*
+const aStarHeuristicFn = useMemo(() => {
+  const typeForAStar =
+    deceptiveMaze && mapType === "Maze"
+      ? "WallAware"          // smarter heuristic only for A* in trap mode
+      : heuristicType;
+
+  return buildHeuristic(N, blocks, goal, diag, typeForAStar);
+}, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
   
 
   // Algorithm generators and state
@@ -771,14 +1003,14 @@ export default function PathfindingLab() {
 
   // Initialize generators when map or N changes
   useEffect(() => {
-    gensRef.current.BFS = algoBFS(N, blocks, start, goal, diag);
+    gensRef.current.BFS      = algoBFS(N, blocks, start, goal, diag);
     gensRef.current.Dijkstra = algoDijkstra(N, blocks, start, goal, diag);
-    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag, heuristicFn);
-    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag, heuristicFn);
+    gensRef.current.Greedy   = algoGreedy(N, blocks, start, goal, diag, greedyHeuristicFn);
+    gensRef.current["A*"]    = algoAStar(N, blocks, start, goal, diag, aStarHeuristicFn);
     setAlgoStates({ BFS: null, Dijkstra: null, Greedy: null, "A*": null });
     setAllFinished(false);
     setRunning(false);
-  }, [N, blocks, start, goal, diag, heuristicFn]);
+  }, [N, blocks, start, goal, diag, greedyHeuristicFn, aStarHeuristicFn]);
 
   // Animation loop (lockstep)
   useEffect(() => {
@@ -842,10 +1074,10 @@ export default function PathfindingLab() {
   }, [algoStates, N, blocks, start, goal]);
 
   const resetRun = () => {
-    gensRef.current.BFS = algoBFS(N, blocks, start, goal, diag);
+    gensRef.current.BFS      = algoBFS(N, blocks, start, goal, diag);
     gensRef.current.Dijkstra = algoDijkstra(N, blocks, start, goal, diag);
-    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag, heuristicFn);
-    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag, heuristicFn);
+    gensRef.current.Greedy   = algoGreedy(N, blocks, start, goal, diag, greedyHeuristicFn);
+    gensRef.current["A*"]    = algoAStar(N, blocks, start, goal, diag, aStarHeuristicFn);
     setAlgoStates({ BFS: null, Dijkstra: null, Greedy: null, "A*": null });
     setAllFinished(false);
     setRunning(false);
@@ -902,7 +1134,19 @@ export default function PathfindingLab() {
               <input id="diag" type="checkbox" checked={diag} onChange={e=>setDiag(e.target.checked)} />
               <label htmlFor="diag" className="text-sm">Allow diagonal moves</label>
             </div>
-            {/* Heuristic Selector */}
+            {mapType === "Maze" && (
+              <div className="mt-2 flex items-center gap-2">
+                    <input
+                      id="deceptiveMaze"
+                      type="checkbox"
+                      checked={deceptiveMaze}
+                      onChange={e => setDeceptiveMaze(e.target.checked)}
+                    />
+                    <label htmlFor="deceptiveMaze" className="text-sm">
+                      Deceptive maze (Greedy trap)
+                    </label>
+                  </div>
+            )}
             {/* Heuristic Selector */}
             <div className="mt-3">
               <label className="block text-sm mb-1">Heuristic</label>
