@@ -43,25 +43,30 @@ interface MapConfig {
 }
 
 // ---------- Experiment parameters (EDIT THESE AS YOU LIKE) ----------
-const OUTPUT_CSV = "experiments/results.csv";
+const OUTPUT_CSV = "experiments/results_general.csv";
 
 // how many seeds per configuration
 const NUM_TRIALS = 100;
 
 // grid sizes to test
-const NS = [64, 128]; // e.g. [16, 32, 64, 128] if you want bigger
+// const NS = [1024, 4048]; // e.g. [16, 32, 64, 128] if you want bigger
 
+const NS = [64,128];
 // map types to test
-const MAP_TYPES: MapType[] = ["Random", "Maze"];
+// const MAP_TYPES: MapType[] = ["Random", "Maze"];
+
+const MAP_TYPES: MapType[] = ["Maze","Random","Empty"];
+
 
 // densities for Random maps
-const DENSITIES = [0.2, 0.35];
+const DENSITIES = [0.20,0.35];
 
 // heuristics to test
-const HEURISTICS: HeuristicType[] = ["Manhattan", "Chebyshev", "Euclidean", "WallAware"];
+const HEURISTICS: HeuristicType[] = ["Manhattan", "WallAware","Euclidean","Chebyshev"];
 
 // use diagonals or not (for simplicity: keep false if you want uniform edge costs)
 const DIAG = false;
+
 
 // whether to use "deceptive" mazes that trap Greedy
 const USE_DECEPTIVE_MAZE = true;
