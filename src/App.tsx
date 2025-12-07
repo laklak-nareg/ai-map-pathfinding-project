@@ -639,6 +639,7 @@ function* algoBFS(
   } as AlgoState;
 }
 
+
 function* algoDijkstra(
   N: number,
   blocks: Uint8Array,
