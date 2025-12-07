@@ -46,7 +46,7 @@ interface MapConfig {
 const OUTPUT_CSV = "experiments/results.csv";
 
 // how many seeds per configuration
-const NUM_TRIALS = 10;
+const NUM_TRIALS = 100;
 
 // grid sizes to test
 const NS = [64, 128]; // e.g. [16, 32, 64, 128] if you want bigger
