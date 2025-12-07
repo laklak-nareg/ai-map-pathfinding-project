@@ -43,9 +43,9 @@ Built with **React + TypeScript**, this project allows users to explore how diff
 
 ### Manhattan Distance (L₁ metric)
 
-\[
+$$
 h(n) = |x_1 - x_2| + |y_1 - y_2|
-\]
+$$
 
 - Natural for 4-directional movement.
 - Admissible and consistent on grids with unit edge costs.
@@ -54,9 +54,9 @@ h(n) = |x_1 - x_2| + |y_1 - y_2|
 
 ### Euclidean Distance (L₂ metric)
 
-\[
+$$
 h(n) = \sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2}
-\]
+$$
 
 - Geometric straight-line distance.
 - Admissible when movement cost is at least the Euclidean step cost.
@@ -65,9 +65,9 @@ h(n) = \sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2}
 
 ### Chebyshev Distance (L∞ metric)
 
-\[
+$$
 h(n) = \max\left(|x_1 - x_2|,\ |y_1 - y_2|\right)
-\]
+$$
 
 - Suited for 8-directional movement.
 - Matches the number of king moves on a chessboard.
@@ -77,9 +77,9 @@ h(n) = \max\left(|x_1 - x_2|,\ |y_1 - y_2|\right)
 
 ### Wall-Aware Heuristic (custom)
 
-\[
+$$
 h(n) = h_{\text{base}}(n) + \lambda \cdot \text{wallPenalty}(n)
-\]
+$$
 
 Where:
 
