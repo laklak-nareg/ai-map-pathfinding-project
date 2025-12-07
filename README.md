@@ -82,10 +82,9 @@ h(n) = h_{\text{base}}(n) + \lambda \cdot \text{wallPenalty}(n)
 $$
 
 Where:
-
-- $$ h_{\text{base}}(n) $$ is either Manhattan or Chebyshev (depending on movement).
-- `wallPenalty(n)` counts how many of the 4 cardinal neighbours of $$ n $$ are walls or outside the grid.
-- $$ \lambda > 0 $$ is a tunable weight.
+- \( h_{\text{base}}(n) \) is either Manhattan or Chebyshev (depending on movement).
+- `wallPenalty(n)` counts how many of the 4 cardinal neighbours of \( n \) are walls or outside the grid.
+- \( \lambda > 0 \) is a tunable weight.
 
 This heuristic:
 
