@@ -4,7 +4,7 @@ project for an AI course — visualization and comparative analysis of BFS, Dijk
 
 # 🧭 AI Pathfinding Lab
 
-An **interactive web application** that visualizes and compares the performance of classical **AI pathfinding algorithms** — **BFS**, **Dijkstra**, **Greedy Best-First Search**, and **A\*** — on configurable maps and procedurally generated mazes.  
+An **interactive web application** that visualizes and compares the performance of classical **AI pathfinding algorithms** — **BFS**, **Dijkstra**, **Greedy Best-First Search**, **BiA\*** **A\*** — on configurable maps and procedurally generated mazes.  
 Built with **React + TypeScript**, this project allows users to explore how different search strategies behave, measure their performance, and visualize optimal vs. non-optimal paths in real time.
 
 ---
