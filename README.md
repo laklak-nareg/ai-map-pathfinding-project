@@ -22,41 +22,21 @@ This Project includes two different ways to evaluate algorithm performance
 
 ⚙️ Configuring the Experiment Runner
 Inside experiments/experiment-runner.ts, modify:
-const OUTPUT_CSV = "your-output-file.csv";    
 
-const NUM_TRIALS = 100;                        
+const OUTPUT_CSV = "your-output-file.csv";    
+const NUM_TRIALS = 100; (number of seeds)                       
 const NS = [1024, 4048];                        
 const MAP_TYPES: MapType[] = ["Maze", "Random", "Empty"];
 const DENSITIES = [0.20, 0.35];
-
-const HEURISTICS: HeuristicType[] = [
-  "Manhattan", "WallAware", "Euclidean", "Chebyshev"
-];
-
+const HEURISTICS: HeuristicType[] = [  "Manhattan", "WallAware", "Euclidean", "Chebyshev"];
 const DIAG = false;                             
 const USE_DECEPTIVE_MAZE = true; 
 
-You can configure:
-
-Grid sizes
-
-Map types
-
-Densities
-
-Heuristics
-
-Diagonal movement
-
-Greedy-trap mazes
-
-Number of trials
-
-CSV output name
+You can configure:  Grid sizes, Map types, Densities, Heuristics, Diagonal movement, Greedy-trap mazes, Number of trials, CSV output name
 
 
     ```bash
-   npx ts-node experiments/experiment-runner.ts
+    npx ts-node experiments/experiment-runner.ts
 
 ---
 
