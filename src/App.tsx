@@ -8,6 +8,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 // - Canvas rendering for speed
 // =====================
 
+
+
 // ---------- Types ----------
 type Cell = { r: number; c: number };
 
@@ -305,14 +307,14 @@ function buildHeuristic(
     return count;
   };
 
-  // 💣 Make the wall-aware heuristic *much* more punishing for "tunnel" cells
-  if (type === "WallAware") {
+  // 💣 Make the wall-aware heuristic punishing for tunnel cells
+  if (type === "WallAware") { // for this I start from a standard distance heuristics, then add a penalty for being in "tunnel like cells"
     const base = diag ? baseChebyshev : baseManhattan;
-    const lambda = 1.2; //hurt a LOT
+    const lambda = 1.2; //hurt a LOT as smaller lamda did not really push A* away much
 
     return (id: number) => {
       const h = base(id);
-      if (h === 0) return 0;
+      if (h === 0) return 0; 
       const penalty = wallPenalty(id);
       return h + lambda * penalty;
     };
@@ -514,6 +516,7 @@ function* algoBiAStar(
   } as AlgoState;
 }
 
+// TODO : make Sure BFS and biA* working in each case of main and experiment, in exepriment BFS should win unless map size is too big, in visual context BiA* should win since smaller number of nodes expanded
 
 
 function* algoBFS(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
@@ -862,11 +865,12 @@ function pickDeceptiveStartGoal(
     const h = hFun(N, start, cell);
     const d = dist[cell];
 
-    // we want cases where d >> h
+    // We want positions where the heuristic looks very optimisitic but the actual path is very long, ie d >> h where greedy in these cases will be overconfident
     const gap = d - h;
     if (gap <= 0) continue;
 
-    const score = gap + (isDeadEnd ? 5 : 0);  // dead ends get a bonus
+
+    const score = gap + (isDeadEnd ? 5 : 0);  // if this is basically a dead end it an even nicer trap
 
     if (score > bestScore) {
       bestScore = score;
