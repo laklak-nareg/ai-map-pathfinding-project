@@ -3,6 +3,61 @@
 An interactive web application that visualizes and compares the performance of classical AI pathfinding algorithms — **BFS**, **Dijkstra**, **Greedy Best-First Search**, **A\***, and **Bidirectional A\*** — on configurable maps and procedurally generated mazes.  
 Built with **React + TypeScript**, this project allows users to explore how different search strategies behave, measure their performance, and visualize optimal vs. non-optimal paths in real time.
 
+
+## 📊 Experimental Evaluation Modes
+This Project includes two different ways to evaluate algorithm performance
+
+---
+
+1. Visual Metric Mode (main branch)
+   Use this if you want to see how algorithms expand nodes and behave on different maps
+   ```bash
+   git checkout main
+   npm run dev
+
+2. Runtime experiment (measurement is actual computational time) experiment-branch
+   Use this mode for precise timing, performance metrics and CSV output
+   ```bash
+   git checkout experiment-branch
+
+⚙️ Configuring the Experiment Runner
+Inside experiments/experiment-runner.ts, modify:
+const OUTPUT_CSV = "your-output-file.csv";    
+
+const NUM_TRIALS = 100;                        
+const NS = [1024, 4048];                        
+const MAP_TYPES: MapType[] = ["Maze", "Random", "Empty"];
+const DENSITIES = [0.20, 0.35];
+
+const HEURISTICS: HeuristicType[] = [
+  "Manhattan", "WallAware", "Euclidean", "Chebyshev"
+];
+
+const DIAG = false;                             
+const USE_DECEPTIVE_MAZE = true; 
+
+You can configure:
+
+Grid sizes
+
+Map types
+
+Densities
+
+Heuristics
+
+Diagonal movement
+
+Greedy-trap mazes
+
+Number of trials
+
+CSV output name
+
+
+    ```bash
+   npx ts-node experiments/experiment-runner.ts
+
 ---
 
 ## 🚀 Features
