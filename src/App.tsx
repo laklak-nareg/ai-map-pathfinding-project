@@ -2,10 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // =====================
 // Pathfinding Lab — Single-file React app
-// - Side-by-side visualization of BFS, Dijkstra, Greedy, and A*
-// - Configurable grid size, map type (Empty / Random / Maze), density, seed
+// - Side-by-side visualization of BFS, Dijkstra, Greedy, A* and BiA*
+// - Configurable grid size, map type (Empty / Random / Maze), density(for random), seed
 // - Lockstep animation so each algorithm advances one expansion per tick
 // - Canvas rendering for speed
+// - performance metric in this is expansion of nodes, not actual run time.
 // =====================
 
 
