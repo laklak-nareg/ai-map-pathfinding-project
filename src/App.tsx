@@ -1,899 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-
-// =====================
-// Pathfinding Lab — Single-file React app
-// - Side-by-side visualization of BFS, Dijkstra, Greedy, A* and BiA*
-// - Configurable grid size, map type (Empty / Random / Maze), density(for random), seed
-// - Lockstep animation so each algorithm advances one expansion per tick
-// - Canvas rendering for speed
-// - performance metric in this is expansion of nodes, not actual run time.
-// =====================
-
-
-
-// ---------- Types ----------
-type Cell = { r: number; c: number };
-
-type MapType = "Empty" | "Random" | "Maze";
-
-type AlgoKey = "BFS" | "Dijkstra" | "Greedy" | "A*" | "BiA*";
-
-type HeuristicType = "Manhattan" | "Chebyshev" | "Euclidean" | "WallAware";
-
-
-interface AlgoState {
-  key: AlgoKey;
-  open: Set<number>; // ids waiting (frontier) (for visualization only)
-  closed: Set<number>; // visited/expanded
-  parents: Map<number, number | null>;
-  found: boolean;
-  finished: boolean; // found or exhausted
-  current?: number; // node popped this tick
-  path?: number[]; // final path ids when found
-  nodesExpanded: number;
-  peakFrontier: number;
-  lastRuntimeMs: number;
-}
-
-interface RunConfig {
-  N: number;
-  mapType: MapType;
-  density: number; // for Random
-  seed: number;
-  diag: boolean; // allow 8-neighbors
-}
-
-// ---------- Utilities ----------
-const idOf = (N: number, r: number, c: number) => r * N + c;
-const rcOf = (N: number, id: number): Cell => ({ r: Math.floor(id / N), c: id % N });
-
-function* rngLCG(seed: number) {
-  // Deterministic RNG, 32-bit LCG
-  let s = (seed >>> 0) || 1;
-  while (true) {
-    s = (1664525 * s + 1013904223) >>> 0;
-    yield s / 2 ** 32;
-  }
-}
-
-// Priority Queue (binary heap)
-class MinHeap<T> {
-  private a: { k: number; v: T }[] = [];
-  size() { return this.a.length; }
-  push(k: number, v: T) { this.a.push({ k, v }); this.bubbleUp(this.a.length - 1); }
-  pop(): T | undefined {
-    if (this.a.length === 0) return undefined;
-    const top = this.a[0].v;
-    const last = this.a.pop()!;
-    if (this.a.length) { this.a[0] = last; this.bubbleDown(0); }
-    return top;
-  }
-  peekKey(): number | undefined { return this.a[0]?.k; }
-  private bubbleUp(i: number) {
-    while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (this.a[p].k <= this.a[i].k) break;
-      [this.a[p], this.a[i]] = [this.a[i], this.a[p]]; i = p;
-    }
-  }
-  private bubbleDown(i: number) {
-    const n = this.a.length;
-    while (true) {
-      let l = i * 2 + 1, r = l + 1, m = i;
-      if (l < n && this.a[l].k < this.a[m].k) m = l;
-      if (r < n && this.a[r].k < this.a[m].k) m = r;
-      if (m === i) break; [this.a[m], this.a[i]] = [this.a[i], this.a[m]]; i = m;
-    }
-  }
-}
-
-// Manhattan / Chebyshev heuristics
-const manhattan = (N: number, a: number, b: number) => {
-  const A = rcOf(N, a), B = rcOf(N, b);
-  return Math.abs(A.r - B.r) + Math.abs(A.c - B.c);
-};
-const chebyshev = (N: number, a: number, b: number) => {
-  const A = rcOf(N, a), B = rcOf(N, b);
-  return Math.max(Math.abs(A.r - B.r), Math.abs(A.c - B.c));
-};
-
-// Neighbors (4- or 8-connected)
-function neighbors(N: number, id: number, diag: boolean) {
-  const { r, c } = rcOf(N, id);
-  const deltas4 = [ [1,0],[ -1,0],[0,1],[0,-1] ];
-  const deltas8 = diag ? deltas4.concat([ [1,1],[1,-1],[-1,1],[-1,-1] ]) : deltas4;
-  const out: number[] = [];
-  for (const [dr, dc] of deltas8) {
-    const nr = r + dr, nc = c + dc;
-    if (nr>=0 && nr<N && nc>=0 && nc<N) out.push(idOf(N,nr,nc));
-  }
-  return out;
-}
-
-// Reconstruct path from parents
-function reconstructPath(parents: Map<number, number | null>, goal: number): number[] {
-  const path: number[] = [];
-  let cur: number | null | undefined = goal;
-  while (cur != null) { path.push(cur); cur = parents.get(cur)!; }
-  return path.reverse();
-}
-
-// ---------- Map Generation ----------
-function generateEmpty(N: number) {
-  const blocks = new Uint8Array(N * N); // 0 free, 1 wall
-  return blocks;
-}
-
-function generateRandom(N: number, density: number, seed: number, start: number, goal: number) {
-  const blocks = new Uint8Array(N * N);
-  const R = rngLCG(seed);
-  for (let i = 0; i < N * N; i++) {
-    const p = (R.next().value as number);
-    blocks[i] = p < density ? 1 : 0;
-  }
-  blocks[start] = 0; blocks[goal] = 0;
-  return blocks;
-}
-
-// Maze via DFS backtracker on a coarser cell grid
-function generateMaze(N: number, seed: number) {
-  // Start with all walls
-  const blocks = new Uint8Array(N * N).fill(1);
-  const R = rngLCG(seed);
-
-  // We'll carve passages on a grid of "cells" at odd coordinates
-  const inBoundsCell = (r: number, c: number) =>
-    r > 0 && r < N - 1 && c > 0 && c < N - 1 && r % 2 === 1 && c % 2 === 1;
-
-  const visited = new Uint8Array(N * N);
-  const stack: Cell[] = [];
-
-  // Start carving from an odd cell (1,1) if possible
-  let sr = 1, sc = 1;
-  if (N <= 2) {
-    sr = 0;
-    sc = 0;
-  }
-
-  stack.push({ r: sr, c: sc });
-  visited[idOf(N, sr, sc)] = 1;
-  blocks[idOf(N, sr, sc)] = 0;
-
-  const cellDirs: [number, number][] = [
-    [2, 0],
-    [-2, 0],
-    [0, 2],
-    [0, -2],
-  ];
-
-  while (stack.length) {
-    const cur = stack[stack.length - 1];
-
-    // shuffle directions for randomness
-    for (let i = cellDirs.length - 1; i > 0; i--) {
-      const j = Math.floor((R.next().value as number) * (i + 1));
-      [cellDirs[i], cellDirs[j]] = [cellDirs[j], cellDirs[i]];
-    }
-
-    let moved = false;
-
-    for (const [dr, dc] of cellDirs) {
-      const nr = cur.r + dr;
-      const nc = cur.c + dc;
-      if (!inBoundsCell(nr, nc)) continue;
-
-      const nid = idOf(N, nr, nc);
-      if (visited[nid]) continue;
-
-      visited[nid] = 1;
-      blocks[nid] = 0;
-
-      // carve the wall between current cell and next cell
-      const wr = cur.r + dr / 2;
-      const wc = cur.c + dc / 2;
-      blocks[idOf(N, wr, wc)] = 0;
-
-      stack.push({ r: nr, c: nc });
-      moved = true;
-      break;
-    }
-
-    if (!moved) {
-      stack.pop();
-    }
-  }
-
-  return blocks;
-}
-
-
-function carvePathToGoal(
-  N: number,
-  blocks: Uint8Array,
-  start: number,
-  goal: number,
-  diag: boolean
-) {
-  // BFS that ignores walls, then we open a path along the found route
-  const prev = new Int32Array(N * N).fill(-1);
-  const q: number[] = [];
-
-  q.push(start);
-  prev[start] = start;
-
-  while (q.length) {
-    const v = q.shift()!;
-    if (v === goal) break;
-
-    for (const nb of neighbors(N, v, diag)) {
-      if (prev[nb] !== -1) continue;
-      // we allow moving through everything here (walls included),
-      // because we are planning to carve the path afterwards
-      prev[nb] = v;
-      q.push(nb);
-    }
-  }
-
-  // If goal still unreachable, give up (should be rare)
-  if (prev[goal] === -1) return;
-
-  // Walk backwards from goal to start and open all cells on that path
-  let cur = goal;
-  while (cur !== start) {
-    blocks[cur] = 0;
-    cur = prev[cur];
-  }
-  blocks[start] = 0;
-  blocks[goal] = 0;
-}
-
-
-// Connectivity check via quick BFS (to avoid unsolvable randoms);
-function solvable(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
-  const q: number[] = [start];
-  const seen = new Uint8Array(N*N); seen[start] = 1;
-  while (q.length) {
-    const x = q.shift()!;
-    if (x === goal) return true;
-    for (const y of neighbors(N,x,diag)) if (!seen[y] && blocks[y]===0) { seen[y]=1; q.push(y); }
-  }
-  return false;
-}
-
-function buildHeuristic(
-  N: number,
-  blocks: Uint8Array,
-  goal: number,
-  diag: boolean,
-  type: HeuristicType
-): (id: number) => number {
-  const goalRC = rcOf(N, goal);
-
-  const baseManhattan = (id: number) => {
-    const p = rcOf(N, id);
-    return Math.abs(p.r - goalRC.r) + Math.abs(p.c - goalRC.c);
-  };
-
-  const baseChebyshev = (id: number) => {
-    const p = rcOf(N, id);
-    return Math.max(Math.abs(p.r - goalRC.r), Math.abs(p.c - goalRC.c));
-  };
-
-  const baseEuclidean = (id: number) => {
-    const p = rcOf(N, id);
-    const dr = p.r - goalRC.r;
-    const dc = p.c - goalRC.c;
-    return Math.sqrt(dr * dr + dc * dc);
-  };
-
-  const wallPenalty = (id: number) => {
-    const { r, c } = rcOf(N, id);
-    let count = 0;
-    const dirs: [number, number][] = [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ];
-
-    for (const [dr, dc] of dirs) {
-      const nr = r + dr;
-      const nc = c + dc;
-      if (nr < 0 || nr >= N || nc < 0 || nc >= N) {
-        count++;
-        continue;
-      }
-      if (blocks[idOf(N, nr, nc)] === 1) count++;
-    }
-    return count;
-  };
-
-  // 💣 Make the wall-aware heuristic punishing for tunnel cells
-  if (type === "WallAware") { // for this I start from a standard distance heuristics, then add a penalty for being in "tunnel like cells"
-    const base = diag ? baseChebyshev : baseManhattan;
-    const lambda = 1.2; //hurt a LOT as smaller lamda did not really push A* away much
-
-    return (id: number) => {
-      const h = base(id);
-      if (h === 0) return 0; 
-      const penalty = wallPenalty(id);
-      return h + lambda * penalty;
-    };
-  }
-
-  if (type === "Chebyshev") return baseChebyshev;
-  if (type === "Euclidean") return baseEuclidean;
-  return baseManhattan;
-}
-// ---------- Algorithm Step Generators ----------
-// Each returns a generator that yields one expansion per step; on completion it returns final AlgoState fields.
-
-function* algoBiAStar(
-  N: number,
-  blocks: Uint8Array,
-  start: number,
-  goal: number,
-  diag: boolean,
-  hForward: (id: number) => number,
-  hBackward: (id: number) => number
-): Generator<AlgoState, AlgoState, void> {
-  const heapF = new MinHeap<number>(); // forward (start -> goal)
-  const heapB = new MinHeap<number>(); // backward (goal -> start)
-
-  const gF = new Float64Array(N * N).fill(Infinity);
-  const gB = new Float64Array(N * N).fill(Infinity);
-  gF[start] = 0;
-  gB[goal] = 0;
-
-  const seenF = new Uint8Array(N * N);
-  const seenB = new Uint8Array(N * N);
-
-  const parentsF = new Map<number, number | null>(); // from start
-  const parentsB = new Map<number, number | null>(); // from goal
-  parentsF.set(start, null);
-  parentsB.set(goal, null);
-
-  const openF = new Set<number>();
-  const openB = new Set<number>();
-  const closedF = new Set<number>();
-  const closedB = new Set<number>();
-
-  const begin = performance.now();
-  const meta = { nodesExpanded: 0, peakFrontier: 0 };
-
-  heapF.push(hForward(start), start);
-  heapB.push(hBackward(goal), goal);
-  openF.add(start);
-  openB.add(goal);
-
-  let meeting: number | null = null;
-
-  const reconstructBiPath = (): number[] => {
-    if (meeting === null) return [];
-    // forward: start -> meeting
-    const pathF = reconstructPath(parentsF, meeting);
-    // backward: goal -> meeting
-    const pathB = reconstructPath(parentsB, meeting); // [goal, ..., meeting]
-    pathB.reverse(); // [meeting, ..., goal]
-    // concat, drop duplicate meeting
-    return pathF.concat(pathB.slice(1));
-  };
-
-  while (heapF.size() || heapB.size()) {
-    // Expand FORWARD once
-    if (heapF.size()) {
-      const n = heapF.pop()!;
-      openF.delete(n);
-      if (!seenF[n]) {
-        seenF[n] = 1;
-        closedF.add(n);
-        meta.nodesExpanded++;
-
-        if (seenB[n]) {
-          meeting = n;
-          const path = reconstructBiPath();
-          const openAll = new Set<number>([...openF, ...openB]);
-          const closedAll = new Set<number>([...closedF, ...closedB]);
-          return {
-            key: "BiA*",
-            open: openAll,
-            closed: closedAll,
-            parents: parentsF, // forward parents are enough to explain from start side
-            found: true,
-            finished: true,
-            current: n,
-            path,
-            nodesExpanded: meta.nodesExpanded,
-            peakFrontier: Math.max(meta.peakFrontier, openAll.size),
-            lastRuntimeMs: performance.now() - begin,
-          };
-        }
-
-        for (const m of neighbors(N, n, diag)) {
-          if (blocks[m] === 1) continue;
-          const w =
-            diag &&
-            rcOf(N, n).r !== rcOf(N, m).r &&
-            rcOf(N, n).c !== rcOf(N, m).c
-              ? Math.SQRT2
-              : 1;
-          const ng = gF[n] + w;
-          if (ng < gF[m]) {
-            gF[m] = ng;
-            parentsF.set(m, n);
-            const f = ng + hForward(m);
-            heapF.push(f, m);
-            openF.add(m);
-          }
-        }
-      }
-    }
-
-    // Expand BACKWARD once
-    if (heapB.size()) {
-      const n = heapB.pop()!;
-      openB.delete(n);
-      if (!seenB[n]) {
-        seenB[n] = 1;
-        closedB.add(n);
-        meta.nodesExpanded++;
-
-        if (seenF[n]) {
-          meeting = n;
-          const path = reconstructBiPath();
-          const openAll = new Set<number>([...openF, ...openB]);
-          const closedAll = new Set<number>([...closedF, ...closedB]);
-          return {
-            key: "BiA*",
-            open: openAll,
-            closed: closedAll,
-            parents: parentsF,
-            found: true,
-            finished: true,
-            current: n,
-            path,
-            nodesExpanded: meta.nodesExpanded,
-            peakFrontier: Math.max(meta.peakFrontier, openAll.size),
-            lastRuntimeMs: performance.now() - begin,
-          };
-        }
-
-        for (const m of neighbors(N, n, diag)) {
-          if (blocks[m] === 1) continue;
-          const w =
-            diag &&
-            rcOf(N, n).r !== rcOf(N, m).r &&
-            rcOf(N, n).c !== rcOf(N, m).c
-              ? Math.SQRT2
-              : 1;
-          const ng = gB[n] + w;
-          if (ng < gB[m]) {
-            gB[m] = ng;
-            parentsB.set(m, n);
-            const f = ng + hBackward(m);
-            heapB.push(f, m);
-            openB.add(m);
-          }
-        }
-      }
-    }
-
-    // yield combined visualization state
-    const openAll = new Set<number>([...openF, ...openB]);
-    const closedAll = new Set<number>([...closedF, ...closedB]);
-    meta.peakFrontier = Math.max(meta.peakFrontier, openAll.size);
-
-    const cur: AlgoState = {
-      key: "BiA*",
-      open: openAll,
-      closed: closedAll,
-      parents: parentsF,
-      found: false,
-      finished: false,
-      current: null as any, // we don't highlight a single node here
-      nodesExpanded: meta.nodesExpanded,
-      peakFrontier: meta.peakFrontier,
-      lastRuntimeMs: performance.now() - begin,
-    };
-
-    yield cur;
-  }
-
-  // No meeting → no path
-  const openAll = new Set<number>([...openF, ...openB]);
-  const closedAll = new Set<number>([...closedF, ...closedB]);
-  return {
-    key: "BiA*",
-    open: openAll,
-    closed: closedAll,
-    parents: parentsF,
-    found: false,
-    finished: true,
-    current: undefined,
-    path: undefined,
-    nodesExpanded: meta.nodesExpanded,
-    peakFrontier: meta.peakFrontier,
-    lastRuntimeMs: performance.now() - begin,
-  } as AlgoState;
-}
-
-// TODO : make Sure BFS and biA* working in each case of main and experiment, in exepriment BFS should win unless map size is too big, in visual context BiA* should win since smaller number of nodes expanded
-
-
-function* algoBFS(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
-  const openQ: number[] = [start];
-  const inQ = new Uint8Array(N*N); inQ[start] = 1;
-  const closed = new Set<number>();
-  const parents = new Map<number, number | null>(); parents.set(start, null);
-  const meta = { nodesExpanded: 0, peakFrontier: 1 };
-  const begin = performance.now();
-
-  while (openQ.length) {
-    meta.peakFrontier = Math.max(meta.peakFrontier, openQ.length);
-    const n = openQ.shift()!;
-    inQ[n] = 0;
-    closed.add(n);
-    meta.nodesExpanded++;
-    const cur: AlgoState = {
-      key: "BFS",
-      open: new Set(openQ),
-      closed: new Set(closed),
-      parents,
-      found: false,
-      finished: false,
-      current: n,
-      nodesExpanded: meta.nodesExpanded,
-      peakFrontier: meta.peakFrontier,
-      lastRuntimeMs: performance.now() - begin,
-    };
-    yield cur;
-
-    if (n === goal) {
-      const path = reconstructPath(parents, goal);
-      return { ...cur, found: true, finished: true, path, lastRuntimeMs: performance.now() - begin };
-    }
-    for (const m of neighbors(N, n, diag)) {
-      if (blocks[m]===1) continue;
-      if (!parents.has(m)) {
-        parents.set(m, n);
-        openQ.push(m); inQ[m] = 1;
-      }
-    }
-  }
-  return {
-    key: "BFS", open: new Set(), closed: closed, parents, found: false, finished: true,
-    nodesExpanded: meta.nodesExpanded, peakFrontier: meta.peakFrontier, lastRuntimeMs:  performance.now() - begin
-  } as AlgoState;
-}
-
-function* algoDijkstra(N: number, blocks: Uint8Array, start: number, goal: number, diag: boolean) {
-  const heap = new MinHeap<number>();
-  const g = new Float64Array(N*N).fill(Infinity); g[start]=0;
-  const seen = new Uint8Array(N*N);
-  const parents = new Map<number, number | null>(); parents.set(start,null);
-  const open = new Set<number>();
-  const closed = new Set<number>();
-  const meta = { nodesExpanded: 0, peakFrontier: 0 };
-  const begin = performance.now();
-
-  heap.push(0, start); open.add(start);
-  while (heap.size()) {
-    const n = heap.pop()!; open.delete(n);
-    if (seen[n]) continue; seen[n]=1; closed.add(n);
-    meta.nodesExpanded++;
-
-    const cur: AlgoState = {
-      key: "Dijkstra", open: new Set(open), closed: new Set(closed), parents,
-      found: false, finished: false, current: n,
-      nodesExpanded: meta.nodesExpanded, peakFrontier: Math.max(meta.peakFrontier, open.size), lastRuntimeMs: performance.now()-begin
-    };
-    yield cur;
-
-    if (n===goal) {
-      const path = reconstructPath(parents, goal);
-      return { ...cur, found: true, finished: true, path, lastRuntimeMs: performance.now()-begin };
-    }
-    for (const m of neighbors(N,n,diag)) {
-      if (blocks[m]===1) continue; const w = (diag && (rcOf(N,n).r!==rcOf(N,m).r && rcOf(N,n).c!==rcOf(N,m).c)) ? Math.SQRT2 : 1;
-      const ng = g[n] + w; if (ng < g[m]) { g[m]=ng; parents.set(m,n); heap.push(ng, m); open.add(m); }
-    }
-    meta.peakFrontier = Math.max(meta.peakFrontier, open.size);
-  }
-  return { key: "Dijkstra", open:new Set(), closed, parents, found:false, finished:true, nodesExpanded:meta.nodesExpanded, peakFrontier:meta.peakFrontier, lastRuntimeMs: performance.now()-begin } as AlgoState;
-}
-
-function* algoGreedy(
-  N: number,
-  blocks: Uint8Array,
-  start: number,
-  goal: number,
-  diag: boolean,
-  heuristic: (id: number) => number
-) {
-  const heap = new MinHeap<number>();
-  const seen = new Uint8Array(N * N);
-  const parents = new Map<number, number | null>();
-  parents.set(start, null);
-  const open = new Set<number>();
-  const closed = new Set<number>();
-  const begin = performance.now();
-  const meta = { nodesExpanded: 0, peakFrontier: 0 };
-
-  heap.push(heuristic(start), start);
-  open.add(start);
-
-  while (heap.size()) {
-    const n = heap.pop()!;
-    open.delete(n);
-    if (seen[n]) continue;
-    seen[n] = 1;
-    closed.add(n);
-    meta.nodesExpanded++;
-
-    const cur: AlgoState = {
-      key: "Greedy",
-      open: new Set(open),
-      closed: new Set(closed),
-      parents,
-      found: false,
-      finished: false,
-      current: n,
-      nodesExpanded: meta.nodesExpanded,
-      peakFrontier: Math.max(meta.peakFrontier, open.size),
-      lastRuntimeMs: performance.now() - begin,
-    };
-    yield cur;
-
-    if (n === goal) {
-      const path = reconstructPath(parents, goal);
-      return {
-        ...cur,
-        found: true,
-        finished: true,
-        path,
-        lastRuntimeMs: performance.now() - begin,
-      };
-    }
-
-    for (const m of neighbors(N, n, diag)) {
-      if (blocks[m] === 1) continue;
-      if (!seen[m]) {
-        if (!parents.has(m)) parents.set(m, n);
-        heap.push(heuristic(m), m);
-        open.add(m);
-      }
-    }
-    meta.peakFrontier = Math.max(meta.peakFrontier, open.size);
-  }
-
-  return {
-    key: "Greedy",
-    open: new Set(),
-    closed,
-    parents,
-    found: false,
-    finished: true,
-    nodesExpanded: meta.nodesExpanded,
-    peakFrontier: meta.peakFrontier,
-    lastRuntimeMs: performance.now() - begin,
-  } as AlgoState;
-}
-
-function* algoAStar(
-  N: number,
-  blocks: Uint8Array,
-  start: number,
-  goal: number,
-  diag: boolean,
-  heuristic: (id: number) => number
-) {
-  const heap = new MinHeap<number>();
-  const g = new Float64Array(N * N).fill(Infinity);
-  g[start] = 0;
-  const seen = new Uint8Array(N * N);
-  const parents = new Map<number, number | null>();
-  parents.set(start, null);
-  const open = new Set<number>();
-  const closed = new Set<number>();
-  const begin = performance.now();
-  const meta = { nodesExpanded: 0, peakFrontier: 0 };
-
-  heap.push(heuristic(start), start);
-  open.add(start);
-
-  while (heap.size()) {
-    const n = heap.pop()!;
-    open.delete(n);
-    if (seen[n]) continue;
-    seen[n] = 1;
-    closed.add(n);
-    meta.nodesExpanded++;
-
-    const cur: AlgoState = {
-      key: "A*",
-      open: new Set(open),
-      closed: new Set(closed),
-      parents,
-      found: false,
-      finished: false,
-      current: n,
-      nodesExpanded: meta.nodesExpanded,
-      peakFrontier: Math.max(meta.peakFrontier, open.size),
-      lastRuntimeMs: performance.now() - begin,
-    };
-    yield cur;
-
-    if (n === goal) {
-      const path = reconstructPath(parents, goal);
-      return {
-        ...cur,
-        found: true,
-        finished: true,
-        path,
-        lastRuntimeMs: performance.now() - begin,
-      };
-    }
-
-    for (const m of neighbors(N, n, diag)) {
-      if (blocks[m] === 1) continue;
-      const w =
-        diag &&
-        rcOf(N, n).r !== rcOf(N, m).r &&
-        rcOf(N, n).c !== rcOf(N, m).c
-          ? Math.SQRT2
-          : 1;
-      const ng = g[n] + w;
-      if (ng < g[m]) {
-        g[m] = ng;
-        parents.set(m, n);
-        const f = ng + heuristic(m);
-        heap.push(f, m);
-        open.add(m);
-      }
-    }
-    meta.peakFrontier = Math.max(meta.peakFrontier, open.size);
-  }
-
-  return {
-    key: "A*",
-    open: new Set(),
-    closed,
-    parents,
-    found: false,
-    finished: true,
-    nodesExpanded: meta.nodesExpanded,
-    peakFrontier: meta.peakFrontier,
-    lastRuntimeMs: performance.now() - begin,
-  } as AlgoState;
-}
-
-
-// ---------- Canvas Drawing ----------
-function drawPanel(ctx: CanvasRenderingContext2D, N: number, sizePx: number, blocks: Uint8Array, state: AlgoState | null, start: number, goal: number) {
-  const cell = sizePx / N;
-  ctx.clearRect(0,0,sizePx,sizePx);
-  // background cells
-  for (let r=0;r<N;r++) {
-    for (let c=0;c<N;c++) {
-      const id = idOf(N,r,c);
-      if (blocks[id]) { ctx.fillStyle = "#0f172a"; } else { ctx.fillStyle = "#f8fafc"; }
-      ctx.fillRect(c*cell, r*cell, cell, cell);
-    }
-  }
-  if (state) {
-    // visited/closed
-    ctx.fillStyle = "#fde68a"; // amber-200
-    state.closed.forEach(id => {
-      const { r, c } = rcOf(N,id); ctx.fillRect(c*cell, r*cell, cell, cell);
-    });
-    // open/frontier
-    ctx.fillStyle = "#bfdbfe"; // blue-200
-    state.open.forEach(id => {
-      const { r, c } = rcOf(N,id); ctx.fillRect(c*cell, r*cell, cell, cell);
-    });
-    // current
-    if (state.current != null) {
-      const { r, c } = rcOf(N,state.current); ctx.fillStyle = "#ef4444"; ctx.fillRect(c*cell, r*cell, cell, cell);
-    }
-    // final path
-    if (state.path) {
-      ctx.fillStyle = "#86efac"; // green-300
-      for (const id of state.path) { const { r, c } = rcOf(N,id); ctx.fillRect(c*cell, r*cell, cell, cell); }
-    }
-  }
-  // start/goal overlays
-  const sRC = rcOf(N,start), gRC = rcOf(N,goal);
-  ctx.fillStyle = "#22c55e"; ctx.fillRect(sRC.c*cell, sRC.r*cell, cell, cell);
-  ctx.fillStyle = "#8b5cf6"; ctx.fillRect(gRC.c*cell, gRC.r*cell, cell, cell);
-  // grid lines (light)
-  ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 0.5;
-  for (let i=0;i<=N;i++) { ctx.beginPath(); ctx.moveTo(0, i*cell); ctx.lineTo(sizePx, i*cell); ctx.stroke(); }
-  for (let j=0;j<=N;j++) { ctx.beginPath(); ctx.moveTo(j*cell, 0); ctx.lineTo(j*cell, sizePx); ctx.stroke(); }
-}
-
-function pickDeceptiveStartGoal(
-  N: number,
-  blocks: Uint8Array,
-  diag: boolean,
-  seed: number
-): { start: number; goal: number } {
-  // collect all free cells
-  const free: number[] = [];
-  for (let i = 0; i < N * N; i++) {
-    if (blocks[i] === 0) free.push(i);
-  }
-  // extreme fallback
-  if (free.length < 2) {
-    return { start: 0, goal: idOf(N, N - 1, N - 1) };
-  }
-
-  // deterministic RNG so it’s reproducible per seed
-  const R = rngLCG(seed + 4242);
-  const start = free[Math.floor((R.next().value as number) * free.length)];
-
-  // BFS distances from start (only through free cells)
-  const dist = new Int32Array(N * N).fill(-1);
-  const q: number[] = [];
-  dist[start] = 0;
-  q.push(start);
-
-  while (q.length) {
-    const v = q.shift()!;
-    for (const nb of neighbors(N, v, diag)) {
-      if (blocks[nb] === 1) continue;          // wall
-      if (dist[nb] !== -1) continue;
-      dist[nb] = dist[v] + 1;
-      q.push(nb);
-    }
-  }
-
-  const hFun = diag ? chebyshev : manhattan;
-
-  let bestGoal = -1;
-  let bestScore = -1;
-
-  for (const cell of free) {
-    if (cell === start) continue;
-    if (dist[cell] === -1) continue;          // unreachable (shouldn’t happen in a perfect maze)
-
-    // how many free neighbours? dead end ≈ 1
-    let freeNb = 0;
-    for (const nb of neighbors(N, cell, diag)) {
-      if (blocks[nb] === 0) freeNb++;
-    }
-    const isDeadEnd = freeNb === 1;
-
-    const h = hFun(N, start, cell);
-    const d = dist[cell];
-
-    // We want positions where the heuristic looks very optimisitic but the actual path is very long, ie d >> h where greedy in these cases will be overconfident
-    const gap = d - h;
-    if (gap <= 0) continue;
-
-
-    const score = gap + (isDeadEnd ? 5 : 0);  // if this is basically a dead end it an even nicer trap
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestGoal = cell;
-    }
-  }
-
-  // fallback: just pick the farthest reachable cell by BFS
-  if (bestGoal === -1) {
-    let far = start;
-    let farDist = 0;
-    for (let i = 0; i < N * N; i++) {
-      if (dist[i] > farDist) {
-        farDist = dist[i];
-        far = i;
-      }
-    }
-    bestGoal = far;
-  }
-
-  return { start, goal: bestGoal };
-}
+import type { AlgoState } from "./interfaces/interfaces";
+import type { AlgoKey, HeuristicType, MapType } from "./types/types";
+import {
+  generateEmpty,
+  generateMaze,
+  generateRandom,
+} from "./utils/mapGen/mapGen";
+import { carvePathToGoal, idOf, rngLCG } from "./utils/utils";
+import { algoGreedy, pickDeceptiveStartGoal } from "./algorithms/Greedy";
+import { buildHeuristic } from "./utils/heuristic/buildHeuristic";
+import { algoAStar } from "./algorithms/aStar";
+import { algoBFS } from "./algorithms/BFS";
+import { algoDijkstra } from "./algorithms/Dijkstra";
+import { algoBiAStar } from "./algorithms/biAstar";
+import { drawPanel } from "./utils/drawpanel/drawpanel";
 
 // ---------- Main Component ----------
 export default function PathfindingLab() {
@@ -906,10 +26,9 @@ export default function PathfindingLab() {
   const [speed, setSpeed] = useState(10); // steps per second
   const [running, setRunning] = useState(false);
 
-  const [heuristicType, setHeuristicType] = useState<HeuristicType>("Manhattan");
+  const [heuristicType, setHeuristicType] =
+    useState<HeuristicType>("Manhattan");
   const [deceptiveMaze, setDeceptiveMaze] = useState(false);
-
-
 
   const sizePx = 360; // per panel
 
@@ -921,122 +40,114 @@ export default function PathfindingLab() {
     let b: Uint8Array;
     let s = start;
     let g = goal;
-  
-    if (mapType === "Empty") {
-      // Simple: top-left to bottom-right
-      b = generateEmpty(N);
-      s = 0;
-      g = idOf(N, N - 1, N - 1);
-  
-    } else if (mapType === "Random") {
-      // Start fixed at 0, goal random but not equal to start
-      s = 0;
-      const R = rngLCG(seed + 999);
-      let gr = Math.floor((R.next().value as number) * N);
-      let gc = Math.floor((R.next().value as number) * N);
-      let gid = idOf(N, gr, gc);
-      if (gid === s) {
-        gr = (gr + 1) % N;
-        gid = idOf(N, gr, gc);
-      }
-      g = gid;
-  
-      // 1) Generate a random obstacle field
-      b = generateRandom(N, density, seed, s, g);
-  
-      // 2) GUARANTEE at least one path from s → g
-      carvePathToGoal(N, b, s, g, diag);
-  
-    } else {
-      // Maze
-      b = generateMaze(N, seed);
-  
-      if (deceptiveMaze) {
-        // Special case: pick a start/goal that misleads Greedy
-        const pair = pickDeceptiveStartGoal(N, b, diag, seed);
-        s = pair.start;
-        g = pair.goal;
-      } else {
-        // Normal maze: just pick two far-ish open cells
-        const open: number[] = [];
-        for (let i = 0; i < N * N; i++) {
-          if (b[i] === 0) open.push(i);
+
+    switch (mapType) {
+      case "Empty":
+        b = generateEmpty(N);
+        s = 0;
+        g = idOf(N, N - 1, N - 1);
+        break;
+      case "Random": {
+        s = 0;
+        const R = rngLCG(seed + 999);
+        let gr = Math.floor((R.next().value as number) * N);
+        let gc = Math.floor((R.next().value as number) * N);
+        let gid = idOf(N, gr, gc);
+        if (gid === s) {
+          gr = (gr + 1) % N;
+          gid = idOf(N, gr, gc);
         }
-  
-        if (open.length >= 2) {
-          s = open[0];
-          g = open[open.length - 1];
+        g = gid;
+
+        //Generate a random obstacle field
+        b = generateRandom(N, density, seed, s, g);
+        //GUARANTEE at least one path from s → g
+        carvePathToGoal(N, b, s, g, diag);
+        break;
+      }
+      default:
+        // Maze
+        b = generateMaze(N, seed);
+
+        if (deceptiveMaze) {
+          // Special case: pick a start/goal that misleads Greedy
+          const pair = pickDeceptiveStartGoal(N, b, diag, seed);
+          s = pair.start;
+          g = pair.goal;
         } else {
-          // Extreme fallback
-          s = 0;
-          g = idOf(N, N - 1, N - 1);
-          b[s] = 0;
-          b[g] = 0;
+          // Normal maze: just pick two far open cells
+          const open: number[] = [];
+          for (let i = 0; i < N * N; i++) {
+            if (b[i] === 0) open.push(i);
+          }
+          if (open.length >= 2) {
+            s = open[0];
+            g = open[open.length - 1];
+          } else {
+            // Extreme fallback
+            s = 0;
+            g = idOf(N, N - 1, N - 1);
+            b[s] = 0;
+            b[g] = 0;
+          }
         }
-      }
+        break;
     }
-  
     return { blocks: b!, startId: s, goalId: g };
   }, [N, mapType, density, seed, diag, deceptiveMaze]);
-
-  // const heuristicFn = useMemo(
-  //   () => buildHeuristic(N, blocks, goal, diag, heuristicType),
-  //   [N, blocks, goal, diag, heuristicType]
-  // );
 
   // Heuristic for Greedy
   const greedyHeuristicFn = useMemo(() => {
     const typeForGreedy =
       deceptiveMaze && mapType === "Maze"
-        ? "Manhattan"          // force naive heuristic in trap mode
-        : heuristicType;       // otherwise follow user selection
-  
+        ? "Manhattan" // force naive heuristic in trap mode
+        : heuristicType; // otherwise follow user selection
+
     return buildHeuristic(N, blocks, goal, diag, typeForGreedy);
   }, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
-  
+
   // Heuristic for A*
   const aStarHeuristicFn = useMemo(() => {
     const typeForAStar =
       deceptiveMaze && mapType === "Maze"
-        ? "WallAware"          // smarter heuristic only for A* in trap mode
+        ? "WallAware" // smarter heuristic only for A* in trap mode
         : heuristicType;
-  
+
     return buildHeuristic(N, blocks, goal, diag, typeForAStar);
   }, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
-  
+
   // Heuristic for Bidirectional A* — forward search (start -> goal)
   const biAStarForwardHeuristicFn = useMemo(() => {
     const typeForBiAStar =
-      deceptiveMaze && mapType === "Maze"
-        ? "WallAware"
-        : heuristicType;
-  
+      deceptiveMaze && mapType === "Maze" ? "WallAware" : heuristicType;
+
     // same as A*: estimate distance to goal
     return buildHeuristic(N, blocks, goal, diag, typeForBiAStar);
   }, [N, blocks, goal, diag, heuristicType, deceptiveMaze, mapType]);
-  
+
   // Heuristic for Bidirectional A* — backward search (goal -> start)
   const biAStarBackwardHeuristicFn = useMemo(() => {
     const typeForBiAStar =
-      deceptiveMaze && mapType === "Maze"
-        ? "WallAware"
-        : heuristicType;
-  
+      deceptiveMaze && mapType === "Maze" ? "WallAware" : heuristicType;
+
     // symmetric: now we estimate distance to START instead
     return buildHeuristic(N, blocks, start, diag, typeForBiAStar);
   }, [N, blocks, start, diag, heuristicType, deceptiveMaze, mapType]);
-  
 
   // Algorithm generators and state
-  const gensRef = useRef<Record<AlgoKey, Generator<AlgoState, AlgoState, void> | null>>({
+  const gensRef = useRef<
+    Record<AlgoKey, Generator<AlgoState, AlgoState, void> | null>
+  >({
     BFS: null,
     Dijkstra: null,
     Greedy: null,
     "A*": null,
     "BiA*": null,
   });
-  
-  const [algoStates, setAlgoStates] = useState<Record<AlgoKey, AlgoState | null>>({
+
+  const [algoStates, setAlgoStates] = useState<
+    Record<AlgoKey, AlgoState | null>
+  >({
     BFS: null,
     Dijkstra: null,
     Greedy: null,
@@ -1049,8 +160,22 @@ export default function PathfindingLab() {
   useEffect(() => {
     gensRef.current.BFS = algoBFS(N, blocks, start, goal, diag);
     gensRef.current.Dijkstra = algoDijkstra(N, blocks, start, goal, diag);
-    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag, greedyHeuristicFn);
-    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag, aStarHeuristicFn);
+    gensRef.current.Greedy = algoGreedy(
+      N,
+      blocks,
+      start,
+      goal,
+      diag,
+      greedyHeuristicFn
+    );
+    gensRef.current["A*"] = algoAStar(
+      N,
+      blocks,
+      start,
+      goal,
+      diag,
+      aStarHeuristicFn
+    );
     gensRef.current["BiA*"] = algoBiAStar(
       N,
       blocks,
@@ -1060,7 +185,7 @@ export default function PathfindingLab() {
       biAStarForwardHeuristicFn,
       biAStarBackwardHeuristicFn
     );
-  
+
     setAlgoStates({
       BFS: null,
       Dijkstra: null,
@@ -1089,21 +214,21 @@ export default function PathfindingLab() {
     let acc = 0;
     const stepInterval = 1000 / speed;
     let last = performance.now();
-  
+
     const tick = () => {
       const now = performance.now();
-      acc += (now - last);
+      acc += now - last;
       last = now;
-  
+
       while (acc >= stepInterval) {
         acc -= stepInterval;
-  
+
         const updates: Partial<Record<AlgoKey, AlgoState>> = {};
-  
+
         (Object.keys(gensRef.current) as AlgoKey[]).forEach((k) => {
           const g = gensRef.current[k];
           if (!g) return; // already finished
-  
+
           const res = g.next();
           if (res.done) {
             updates[k] = res.value;
@@ -1112,21 +237,21 @@ export default function PathfindingLab() {
             updates[k] = res.value;
           }
         });
-  
+
         setAlgoStates((s) => ({ ...s, ...(updates as any) }));
-  
+
         // ✅ Stop only when ALL 4 are finished
-        const allDone = (Object.values(gensRef.current).every((g) => g === null));
+        const allDone = Object.values(gensRef.current).every((g) => g === null);
         if (allDone) {
           setAllFinished(true);
           setRunning(false);
           break;
         }
       }
-  
+
       handle = requestAnimationFrame(tick);
     };
-  
+
     handle = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(handle);
   }, [running, speed]);
@@ -1139,10 +264,13 @@ export default function PathfindingLab() {
     "A*": useRef(null),
     "BiA*": useRef(null),
   };
-  useEffect(()=>{
-    (Object.keys(canvasRefs) as AlgoKey[]).forEach(key => {
-      const cvs = canvasRefs[key].current; if (!cvs) return;
-      const ctx = (cvs as HTMLCanvasElement).getContext("2d"); if (!ctx) return;
+  
+  useEffect(() => {
+    (Object.keys(canvasRefs) as AlgoKey[]).forEach((key) => {
+      const cvs = canvasRefs[key].current;
+      if (!cvs) return;
+      const ctx = (cvs as HTMLCanvasElement).getContext("2d");
+      if (!ctx) return;
       drawPanel(ctx, N, sizePx, blocks, algoStates[key], start, goal);
     });
   }, [algoStates, N, blocks, start, goal]);
@@ -1150,8 +278,22 @@ export default function PathfindingLab() {
   const resetRun = () => {
     gensRef.current.BFS = algoBFS(N, blocks, start, goal, diag);
     gensRef.current.Dijkstra = algoDijkstra(N, blocks, start, goal, diag);
-    gensRef.current.Greedy = algoGreedy(N, blocks, start, goal, diag, greedyHeuristicFn);
-    gensRef.current["A*"] = algoAStar(N, blocks, start, goal, diag, aStarHeuristicFn);
+    gensRef.current.Greedy = algoGreedy(
+      N,
+      blocks,
+      start,
+      goal,
+      diag,
+      greedyHeuristicFn
+    );
+    gensRef.current["A*"] = algoAStar(
+      N,
+      blocks,
+      start,
+      goal,
+      diag,
+      aStarHeuristicFn
+    );
     gensRef.current["BiA*"] = algoBiAStar(
       N,
       blocks,
@@ -1161,7 +303,7 @@ export default function PathfindingLab() {
       biAStarForwardHeuristicFn,
       biAStarBackwardHeuristicFn
     );
-  
+
     setAlgoStates({
       BFS: null,
       Dijkstra: null,
@@ -1172,19 +314,18 @@ export default function PathfindingLab() {
     setAllFinished(false);
     setRunning(false);
   };
-  
 
   const winningOrder = useMemo(() => {
     const items = Object.entries(algoStates)
       .map(([k, s]) => ({ key: k as AlgoKey, s }))
-      .filter(({ s }) => s && s.finished)                            // only finished
+      .filter(({ s }) => s && s.finished) // only finished
       .map(({ key, s }) => ({
         key,
         t: s!.lastRuntimeMs || Number.POSITIVE_INFINITY,
         found: !!s!.found,
       }))
       .sort((a, b) => a.t - b.t);
-  
+
     return items;
   }, [algoStates]);
 
@@ -1198,52 +339,88 @@ export default function PathfindingLab() {
       <div className="wrapper">
         <header className="mb-6">
           <h1 className="text-3xl font-bold tracking-tight">Pathfinding Lab</h1>
-          <p className="text-slate-600">Side‑by‑side BFS · Dijkstra · Greedy · A* on configurable grids</p>
+          <p className="text-slate-600">
+            Side‑by‑side BFS · Dijkstra · Greedy · A* on configurable grids
+          </p>
         </header>
 
         {/* Controls */}
         <div className="controls">
-        <div className="control-card">
+          <div className="control-card">
             <label className="block text-sm mb-1">Grid Size (N×N)</label>
-            <input type="number" value={N} min={5} max={150} onChange={e=>setN(Math.max(5, Math.min(150, Number(e.target.value)||16)))} className="w-full border rounded px-3 py-2" />
-            <div className="text-xs text-slate-500 mt-1">Try 9, 16, 50, 100…</div>
+            <input
+              type="number"
+              value={N}
+              min={5}
+              max={150}
+              onChange={(e) =>
+                setN(Math.max(5, Math.min(150, Number(e.target.value) || 16)))
+              }
+              className="w-full border rounded px-3 py-2"
+            />
+            <div className="text-xs text-slate-500 mt-1">
+              Try 9, 16, 50, 100…
+            </div>
           </div>
           <div className="control-card">
             <label className="block text-sm mb-1">Map Type</label>
-            <select value={mapType} onChange={e=>setMapType(e.target.value as MapType)} className="w-full border rounded px-3 py-2">
+            <select
+              value={mapType}
+              onChange={(e) => setMapType(e.target.value as MapType)}
+              className="w-full border rounded px-3 py-2"
+            >
               <option>Empty</option>
               <option>Random</option>
               <option>Maze</option>
             </select>
             {mapType === "Random" && (
               <div className="mt-3">
-                <label className="block text-sm">Obstacle Density: {(density*100).toFixed(0)}%</label>
-                <input type="range" min={0} max={0.5} step={0.01} value={density} onChange={e=>setDensity(Number(e.target.value))} className="w-full" />
+                <label className="block text-sm">
+                  Obstacle Density: {(density * 100).toFixed(0)}%
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={0.5}
+                  step={0.01}
+                  value={density}
+                  onChange={(e) => setDensity(Number(e.target.value))}
+                  className="w-full"
+                />
               </div>
             )}
             <div className="mt-3 flex items-center gap-2">
-              <input id="diag" type="checkbox" checked={diag} onChange={e=>setDiag(e.target.checked)} />
-              <label htmlFor="diag" className="text-sm">Allow diagonal moves</label>
+              <input
+                id="diag"
+                type="checkbox"
+                checked={diag}
+                onChange={(e) => setDiag(e.target.checked)}
+              />
+              <label htmlFor="diag" className="text-sm">
+                Allow diagonal moves
+              </label>
             </div>
             {mapType === "Maze" && (
               <div className="mt-2 flex items-center gap-2">
-                    <input
-                      id="deceptiveMaze"
-                      type="checkbox"
-                      checked={deceptiveMaze}
-                      onChange={e => setDeceptiveMaze(e.target.checked)}
-                    />
-                    <label htmlFor="deceptiveMaze" className="text-sm">
-                      Deceptive maze (Greedy trap)
-                    </label>
-                  </div>
+                <input
+                  id="deceptiveMaze"
+                  type="checkbox"
+                  checked={deceptiveMaze}
+                  onChange={(e) => setDeceptiveMaze(e.target.checked)}
+                />
+                <label htmlFor="deceptiveMaze" className="text-sm">
+                  Deceptive maze (Greedy trap)
+                </label>
+              </div>
             )}
             {/* Heuristic Selector */}
             <div className="mt-3">
               <label className="block text-sm mb-1">Heuristic</label>
               <select
                 value={heuristicType}
-                onChange={e => setHeuristicType(e.target.value as HeuristicType)}
+                onChange={(e) =>
+                  setHeuristicType(e.target.value as HeuristicType)
+                }
                 className="w-full border rounded px-3 py-2"
               >
                 <option value="Manhattan">Manhattan (L1)</option>
@@ -1252,39 +429,84 @@ export default function PathfindingLab() {
                 <option value="WallAware">Wall-Aware (experimental)</option>
               </select>
             </div>
-
           </div>
           <div className="control-card">
             <label className="block text-sm mb-1">Seed</label>
-            <input type="number" value={seed} onChange={e=>setSeed(Number(e.target.value)||0)} className="w-full border rounded px-3 py-2" />
+            <input
+              type="number"
+              value={seed}
+              onChange={(e) => setSeed(Number(e.target.value) || 0)}
+              className="w-full border rounded px-3 py-2"
+            />
             <div className="text-xs text-slate-500 mt-1">Reproducible maps</div>
             <label className="block text-sm mt-4">Speed: {speed} steps/s</label>
-            <input type="range" min={1} max={60} value={speed} onChange={e=>setSpeed(Number(e.target.value))} className="w-full" />
+            <input
+              type="range"
+              min={1}
+              max={60}
+              value={speed}
+              onChange={(e) => setSpeed(Number(e.target.value))}
+              className="w-full"
+            />
           </div>
           <div className="bg-white rounded-2xl shadow p-4 flex flex-col gap-2">
-            <button onClick={()=>setRunning(true)} disabled={running} className="px-4 py-2 rounded-xl bg-emerald-600 text-white disabled:opacity-50">Start</button>
-            <button onClick={()=>setRunning(false)} className="px-4 py-2 rounded-xl bg-amber-500 text-white">Pause</button>
-            <button onClick={resetRun} className="px-4 py-2 rounded-xl bg-slate-800 text-white">Reset</button>
-            <div className="text-xs text-slate-500">Start: (0,0) · Goal: ({N-1},{N-1})</div>
+            <button
+              onClick={() => setRunning(true)}
+              disabled={running}
+              className="px-4 py-2 rounded-xl bg-emerald-600 text-white disabled:opacity-50"
+            >
+              Start
+            </button>
+            <button
+              onClick={() => setRunning(false)}
+              className="px-4 py-2 rounded-xl bg-amber-500 text-white"
+            >
+              Pause
+            </button>
+            <button
+              onClick={resetRun}
+              className="px-4 py-2 rounded-xl bg-slate-800 text-white"
+            >
+              Reset
+            </button>
+            <div className="text-xs text-slate-500">
+              Start: (0,0) · Goal: ({N - 1},{N - 1})
+            </div>
           </div>
         </div>
 
         {/* Panels */}
         <div className="panels">
-          {(Object.keys(canvasRefs) as AlgoKey[]).map(key=>{
+          {(Object.keys(canvasRefs) as AlgoKey[]).map((key) => {
             const s = algoStates[key];
             return (
               <div key={key} className="panel">
                 <div className="flex items-center justify-between mb-2">
                   <h2 className="font-semibold">{key}</h2>
-                  <div className="text-xs text-slate-500">{s?.found ? "Found" : s?.finished ? "No path" : running ? "Running" : "Idle"}</div>
+                  <div className="text-xs text-slate-500">
+                    {s?.found
+                      ? "Found"
+                      : s?.finished
+                      ? "No path"
+                      : running
+                      ? "Running"
+                      : "Idle"}
+                  </div>
                 </div>
                 <canvas ref={canvasRefs[key]} width={sizePx} height={sizePx} />
                 <div className="stats">
-                  <div className="text-slate-500">Expanded</div><div className="font-mono">{s?.nodesExpanded ?? 0}</div>
-                  <div className="text-slate-500">Peak frontier</div><div className="font-mono">{s?.peakFrontier ?? 0}</div>
-                  <div className="text-slate-500">Runtime</div><div className="font-mono">{s ? s.lastRuntimeMs.toFixed(1)+" ms" : "0.0 ms"}</div>
-                  <div className="text-slate-500">Path length</div><div className="font-mono">{s?.path ? s.path.length : "—"}</div>
+                  <div className="text-slate-500">Expanded</div>
+                  <div className="font-mono">{s?.nodesExpanded ?? 0}</div>
+                  <div className="text-slate-500">Peak frontier</div>
+                  <div className="font-mono">{s?.peakFrontier ?? 0}</div>
+                  <div className="text-slate-500">Runtime</div>
+                  <div className="font-mono">
+                    {s ? s.lastRuntimeMs.toFixed(1) + " ms" : "0.0 ms"}
+                  </div>
+                  <div className="text-slate-500">Path length</div>
+                  <div className="font-mono">
+                    {s?.path ? s.path.length : "—"}
+                  </div>
                 </div>
               </div>
             );
@@ -1294,22 +516,30 @@ export default function PathfindingLab() {
         {/* Podium / order */}
         <div className="finish-order">
           <h3 className="font-semibold mb-2">Finish Order</h3>
-          {winningOrder.length===0 ? (
-            <div className="text-sm text-slate-500">No algorithm has finished yet.</div>
+          {winningOrder.length === 0 ? (
+            <div className="text-sm text-slate-500">
+              No algorithm has finished yet.
+            </div>
           ) : (
             <ol className="list-decimal list-inside space-y-1">
               {winningOrder.map((w, i) => (
                 <li key={i} className="text-sm">
-                  {w.key} — <span className="font-mono">{isFinite(w.t) ? `${w.t.toFixed(1)} ms` : "—"}</span>
+                  {w.key} —{" "}
+                  <span className="font-mono">
+                    {isFinite(w.t) ? `${w.t.toFixed(1)} ms` : "—"}
+                  </span>
                   {!w.found && <span className="text-sm"> (no path)</span>}
                 </li>
-                ))}
+              ))}
             </ol>
           )}
         </div>
 
         <footer className="mt-8 text-xs text-slate-500">
-          Tips: Use small N (9 or 16) to watch the expansions; then scale to 50–100 for performance comparisons. Colors — walls: slate‑900, visited: amber‑200, frontier: blue‑200, path: green‑300, current: red; start: green; goal: violet.
+          Tips: Use small N (9 or 16) to watch the expansions; then scale to
+          50–100 for performance comparisons. Colors — walls: slate‑900,
+          visited: amber‑200, frontier: blue‑200, path: green‑300, current: red;
+          start: green; goal: violet.
         </footer>
       </div>
     </div>
